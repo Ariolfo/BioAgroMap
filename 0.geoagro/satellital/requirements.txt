@@ -1,0 +1,10 @@
+# create a venv if you like, then:
+sentinelhub 
+shapely 
+rasterio 
+numpy 
+matplotlib
+edc
+geopandas
+
+# conda activate satellital_env

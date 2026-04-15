@@ -38,6 +38,9 @@ class PredictRequest(BaseModel):
 class DownloadRequest(BaseModel):
     project_id: int
     source: str
+    start_date: str | None = None
+    end_date: str | None = None
+    layer_id: int | None = None
 
 
 class CropRequest(BaseModel):

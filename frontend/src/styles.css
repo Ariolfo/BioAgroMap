@@ -517,6 +517,199 @@ body {
   cursor: not-allowed;
 }
 
+.date-range-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.date-range-fields label {
+  font-size: 12px;
+}
+
+.date-range-fields input[type="date"] {
+  width: 100%;
+  padding: 6px;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.step-fieldset {
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  padding: 10px;
+  margin: 0;
+}
+
+.step-fieldset legend {
+  font-size: 12px;
+  font-weight: 600;
+  color: #1a3f8c;
+  padding: 0 4px;
+}
+
+.step-fieldset select,
+.step-fieldset input[type="file"] {
+  margin-top: 4px;
+}
+
+.lote-mode-toggle {
+  display: flex;
+  gap: 12px;
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+
+.lote-mode-toggle label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.lote-mode-toggle input[type="radio"] {
+  width: auto;
+  margin: 0;
+}
+
+.s2-progress {
+  margin-top: 10px;
+  padding: 10px;
+  background: #e8f0fe;
+  border-radius: 6px;
+  border: 1px solid #b8cce8;
+}
+
+.s2-progress-done {
+  background: #e6f7e6;
+  border-color: #8fce8f;
+}
+
+.s2-progress-err {
+  background: #fde8e8;
+  border-color: #e0a0a0;
+}
+
+.s2-progress-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #1a3f8c;
+  margin-bottom: 6px;
+}
+
+.s2-progress-bar-wrap {
+  height: 10px;
+  background: #d0dce8;
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.s2-progress-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #1f4cc8, #4a7ae8);
+  border-radius: 5px;
+  transition: width 0.35s ease;
+}
+
+.s2-progress-msg {
+  font-size: 11px;
+  color: #444;
+  margin-top: 6px;
+  line-height: 1.35;
+}
+
+.s2-progress-done .s2-progress-msg,
+.s2-progress-err .s2-progress-msg {
+  display: block;
+  margin-top: 4px;
+}
+
+.downloads-explorer {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed #c8d4e8;
+}
+
+.downloads-explorer-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #1a3f8c;
+  margin-bottom: 6px;
+}
+
+.downloads-hint {
+  font-size: 11px;
+  color: #555;
+  line-height: 1.4;
+  margin: 0 0 10px;
+}
+
+.downloads-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.downloads-item {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 8px 10px;
+  background: #f6f8fc;
+  border: 1px solid #e0e6f0;
+  border-radius: 6px;
+}
+
+.downloads-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.downloads-size {
+  color: #666;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.btn-import-download {
+  padding: 6px 10px;
+  font-size: 11px;
+  border-radius: 6px;
+  border: 1px solid #1f4cc8;
+  background: #fff;
+  color: #1f4cc8;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn-import-download:hover:not(:disabled) {
+  background: #e8f0fe;
+}
+
+.btn-import-download:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+@media (max-width: 600px) {
+  .downloads-item {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+
+  .btn-import-download {
+    justify-self: start;
+  }
+}
+
 @media (max-width: 768px) {
   .layout {
     grid-template-columns: 1fr;

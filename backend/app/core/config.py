@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     ai_service_url: str = "http://localhost:8001"
     storage_path: str = "/data/storage"
     max_upload_mb: int = 100
+    copernicus_user: str = ""
+    copernicus_password: str = ""
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 

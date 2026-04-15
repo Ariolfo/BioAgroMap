@@ -3,13 +3,10 @@ export default function PreprocessPanel({
   projectId,
   loading,
   targetRasterId,
-  downloadSource,
-  setDownloadSource,
   indiceType,
   setIndiceType,
   stackMode,
   setStackMode,
-  onDownload,
   onCrop,
   onIndices,
   onStack,
@@ -17,34 +14,15 @@ export default function PreprocessPanel({
 }) {
   return (
     <>
-      <label>
-        1) Descargar
-        <select
-          value={downloadSource}
-          onChange={(e) => setDownloadSource(e.target.value)}
-        >
-          <option value="sentinel-1">Sentinel-1</option>
-          <option value="sentinel-2">Sentinel-2</option>
-          <option value="landsat-8-9">Landsat 8/9</option>
-          <option value="drone">Drone</option>
-        </select>
-      </label>
-      <button
-        onClick={onDownload}
-        disabled={loading || !projectId || !token}
-      >
-        Ejecutar descarga
-      </button>
-
       <button
         onClick={onCrop}
         disabled={loading || !projectId || !token || !targetRasterId}
       >
-        2) Recorte
+        1) Recorte
       </button>
 
       <label>
-        3) Indices
+        2) Indices
         <select
           value={indiceType}
           onChange={(e) => setIndiceType(e.target.value)}
@@ -62,7 +40,7 @@ export default function PreprocessPanel({
       </button>
 
       <label>
-        4) Stack
+        3) Stack
         <select
           value={stackMode}
           onChange={(e) => setStackMode(e.target.value)}
@@ -82,7 +60,7 @@ export default function PreprocessPanel({
         onClick={onCluster}
         disabled={loading || !projectId || !token || !targetRasterId}
       >
-        5) Cluster
+        4) Cluster
       </button>
     </>
   );

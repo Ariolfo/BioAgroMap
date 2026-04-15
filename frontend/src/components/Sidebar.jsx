@@ -45,10 +45,12 @@ export default function Sidebar({
   onUploadRaster,
   onRunAI,
   onDownload,
+  onImportRasterFromDownloads,
   onCrop,
   onIndices,
   onStack,
   onCluster,
+  s2Download,
 }) {
   const [activeTab, setActiveTab] = useState("admin");
   const [panelOpen, setPanelOpen] = useState(true);
@@ -92,7 +94,7 @@ export default function Sidebar({
             setLayersPanelOpen(false);
           }}
         >
-          Preprocesamiento
+          Procesos
         </button>
         <button
           role="tab"
@@ -162,10 +164,16 @@ export default function Sidebar({
           onUploadLote={onUploadLote}
           onUploadRaster={onUploadRaster}
           onRunAI={onRunAI}
+          onDownload={onDownload}
+          onImportRasterFromDownloads={onImportRasterFromDownloads}
           loteFile={loteFile}
           setLoteFile={setLoteFile}
           rasterFile={rasterFile}
           setRasterFile={setRasterFile}
+          downloadSource={downloadSource}
+          setDownloadSource={setDownloadSource}
+          mapLayers={mapLayers}
+          s2Download={s2Download}
         />
       ) : null}
 
@@ -175,13 +183,10 @@ export default function Sidebar({
           projectId={projectId}
           loading={loading}
           targetRasterId={targetRasterId}
-          downloadSource={downloadSource}
-          setDownloadSource={setDownloadSource}
           indiceType={indiceType}
           setIndiceType={setIndiceType}
           stackMode={stackMode}
           setStackMode={setStackMode}
-          onDownload={onDownload}
           onCrop={onCrop}
           onIndices={onIndices}
           onStack={onStack}

@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import api, { setAuthToken } from "./api";
 import useMapLayers from "./hooks/useMapLayers";
@@ -25,6 +25,46 @@ export default function App() {
   const [indiceType, setIndiceType] = useState("NDVI");
   const [stackMode, setStackMode] = useState("visualizar");
   const [targetRasterId, setTargetRasterId] = useState("");
+  const [s2Download, setS2Download] = useState(null);
+
+  useEffect(() => {
+    setS2Download(null);
+  }, [projectId]);
+
+  useEffect(() => {
+    if (!s2Download || s2Download.ui_status !== "downloading" || !projectId || !token) {
+      return undefined;
+    }
+    const rasterId = s2Download.rasterId;
+    const poll = async () => {
+      try {
+        setAuthToken(token);
+        const r = await api.get(`/preprocess/sentinel-status/${projectId}/${rasterId}`);
+        const st = r.data.ui_status;
+        setS2Download((prev) => {
+          if (!prev || prev.rasterId !== rasterId) return prev;
+          return {
+            ...prev,
+            progress: r.data.progress ?? prev.progress,
+            message: r.data.message ?? prev.message,
+            ui_status: st,
+          };
+        });
+        if (st === "completed") {
+          setMessage(
+            `Sentinel-2: descarga terminada.${r.data.total_downloaded != null ? ` Archivos: ${r.data.total_downloaded}.` : ""}`
+          );
+        } else if (st === "failed") {
+          setMessage(`Sentinel-2: ${r.data.message || "Error"}`);
+        }
+      } catch (_) {
+        /* ignore transient errors */
+      }
+    };
+    poll();
+    const iv = setInterval(poll, 2000);
+    return () => clearInterval(iv);
+  }, [s2Download?.rasterId, s2Download?.ui_status, projectId, token]);
 
   const {
     mapLayers,
@@ -146,13 +186,20 @@ export default function App() {
         }
       });
       for (const raster of rastersRes.data) {
+        const m = raster.metadata || {};
+        if (m.source === "sentinel-2" && m.type === "download") {
+          continue;
+        }
         addMapLayer(raster.name, "raster", null, raster.id);
         if (raster.id) setTargetRasterId(String(raster.id));
       }
       if (firstBbox && mapRef.current) {
         mapRef.current.fitBounds(firstBbox, { padding: 60, maxZoom: 17 });
       }
-      const totalLayers = layersRes.data.length + rastersRes.data.length;
+      const visibleRasters = rastersRes.data.filter(
+        (r) => !((r.metadata || {}).source === "sentinel-2" && (r.metadata || {}).type === "download")
+      );
+      const totalLayers = layersRes.data.length + visibleRasters.length;
       const proj = projects.find((p) => p.id === id);
       const projName = proj ? proj.name : `ID ${id}`;
       setMessage(
@@ -345,9 +392,11 @@ export default function App() {
       }
       setLoteFile(null);
       setMessage(`Lote cargado correctamente. Layer ID: ${layerId}`);
+      return layerId;
     } catch (error) {
       const detail = error?.response?.data?.detail || error.message || "Error al subir lote";
       setMessage(`Error: ${detail}`);
+      return null;
     } finally {
       setLoading(false);
     }
@@ -400,7 +449,7 @@ export default function App() {
     }
   }
 
-  async function preprocessDownload() {
+  async function preprocessDownload(startDate, endDate, layerId) {
     if (!token || !projectId) {
       setMessage("Error: debes iniciar sesion y crear proyecto.");
       return;
@@ -409,15 +458,58 @@ export default function App() {
     setMessage("");
     try {
       setAuthToken(token);
-      const res = await api.post("/preprocess/download", {
+      const body = {
         project_id: Number(projectId),
         source: downloadSource,
-      });
-      setTargetRasterId(String(res.data.raster_layer_id));
-      addMapLayer(`${downloadSource}.tif`, "raster", null);
-      setMessage(`Descarga completada. Raster ID: ${res.data.raster_layer_id}`);
+      };
+      if (downloadSource === "sentinel-2") {
+        body.start_date = startDate;
+        body.end_date = endDate;
+      }
+      if (layerId) {
+        body.layer_id = Number(layerId);
+      }
+      const res = await api.post("/preprocess/download", body);
+      if (downloadSource !== "sentinel-2") {
+        setTargetRasterId(String(res.data.raster_layer_id));
+        addMapLayer(`${downloadSource}.tif`, "raster", null, res.data.raster_layer_id);
+      }
+      if (res.data.status === "downloading" && downloadSource === "sentinel-2") {
+        setS2Download({
+          rasterId: res.data.raster_layer_id,
+          taskId: res.data.task_id,
+          progress: 0,
+          message: "Iniciando descarga Sentinel-2...",
+          ui_status: "downloading",
+        });
+        setMessage(`Descarga Sentinel-2 en curso (raster #${res.data.raster_layer_id})`);
+      } else if (res.data.status === "downloading") {
+        setMessage(`Descarga iniciada. Raster ID: ${res.data.raster_layer_id}`);
+      } else {
+        setMessage(`Descarga completada. Raster ID: ${res.data.raster_layer_id}`);
+      }
     } catch (error) {
       const detail = error?.response?.data?.detail || error.message || "Error en descarga";
+      setMessage(`Error: ${detail}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function importRasterFromDownloads(filename) {
+    if (!token || !projectId || !filename) return;
+    setLoading(true);
+    setMessage("");
+    try {
+      setAuthToken(token);
+      const res = await api.post(
+        `/raster/import-from-downloads?project_id=${projectId}&filename=${encodeURIComponent(filename)}`
+      );
+      setTargetRasterId(String(res.data.raster_layer_id));
+      addMapLayer(res.data.name || filename, "raster", null, res.data.raster_layer_id);
+      setMessage(`Imagen importada a capas: ${res.data.name || filename}`);
+    } catch (error) {
+      const detail = error?.response?.data?.detail || error.message || "Error al importar";
       setMessage(`Error: ${detail}`);
     } finally {
       setLoading(false);
@@ -560,10 +652,12 @@ export default function App() {
         onUploadRaster={uploadRaster}
         onRunAI={runAI}
         onDownload={preprocessDownload}
+        onImportRasterFromDownloads={importRasterFromDownloads}
         onCrop={preprocessCrop}
         onIndices={preprocessIndices}
         onStack={preprocessStack}
         onCluster={preprocessCluster}
+        s2Download={s2Download}
       />
       <MapView
         mapRef={mapRef}

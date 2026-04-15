@@ -23,6 +23,8 @@ services:
       - ./backend:/app
       - ./data:/data
     command: bash -lc "apt-get update && apt-get install -y libexpat1 && pip install -r requirements.txt && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    env_file:
+      - .env
     environment:
       DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/bioagromap
       REDIS_URL: redis://redis:6379/0
@@ -45,6 +47,8 @@ services:
       DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/bioagromap
       REDIS_URL: redis://redis:6379/0
       STORAGE_PATH: /data/storage
+    env_file:
+      - .env
     depends_on:
       - redis
       - postgres

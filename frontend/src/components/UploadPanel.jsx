@@ -1,3 +1,6 @@
+import { useEffect, useState } from "react";
+import api from "../api";
+
 export default function UploadPanel({
   token,
   projectId,
@@ -7,63 +10,270 @@ export default function UploadPanel({
   onUploadLote,
   onUploadRaster,
   onRunAI,
+  onDownload,
+  onImportRasterFromDownloads,
   loteFile,
   setLoteFile,
   rasterFile,
   setRasterFile,
+  downloadSource,
+  setDownloadSource,
+  mapLayers,
+  s2Download,
 }) {
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  const [selectedLayerId, setSelectedLayerId] = useState("");
+  const [uploadedLayerId, setUploadedLayerId] = useState("");
+  const [loteMode, setLoteMode] = useState("existing");
+  const [downloadFiles, setDownloadFiles] = useState([]);
+
+  useEffect(() => {
+    if (!token || !projectId) {
+      setDownloadFiles([]);
+      return undefined;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await api.get(`/raster/project-downloads/${projectId}`);
+        if (!cancelled) setDownloadFiles(r.data.files || []);
+      } catch {
+        if (!cancelled) setDownloadFiles([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [token, projectId, s2Download?.ui_status]);
+
+  const vectorLayers = mapLayers.filter((l) => l.kind === "vector");
+  const hasVectorLayers = vectorLayers.length > 0;
+
+  const activeLayerId = loteMode === "existing" ? selectedLayerId : uploadedLayerId;
+  const isSentinel2 = downloadSource === "sentinel-2";
+  const downloadDisabled =
+    loading || !projectId || !token ||
+    (isSentinel2 && (!startDate || !endDate)) ||
+    !activeLayerId;
+
+  async function handleUploadLote() {
+    const newLayerId = await onUploadLote();
+    if (newLayerId) {
+      setUploadedLayerId(String(newLayerId));
+    }
+  }
+
+  function handleDownload() {
+    onDownload(
+      isSentinel2 ? startDate : undefined,
+      isSentinel2 ? endDate : undefined,
+      activeLayerId
+    );
+  }
+
   return (
     <>
       {(!token || !projectId) ? (
         <div className="warn-msg">Primero crea cuenta y proyecto en Admin.</div>
       ) : null}
-      <label>
-        1) Subir lote (SHP/KML/KMZ/ZIP/GeoJSON)
-        <input
-          type="file"
-          accept=".zip,.shp,.kml,.kmz,.geojson,.json,application/vnd.google-earth.kmz,application/vnd.google-earth.kml+xml"
-          onChange={(e) => setLoteFile(e.target.files?.[0] || null)}
-          disabled={loading}
-        />
-      </label>
-      <button
-        onClick={onUploadLote}
-        disabled={!token || !projectId || !loteFile || loading}
-      >
-        Subir lote {loteFile ? `(${loteFile.name})` : ""}
-      </button>
 
-      <label>
-        2) Subir raster
+      <fieldset className="step-fieldset">
+        <legend>1) Capa vectorial (lote / area de interes)</legend>
+
+        <div className="lote-mode-toggle">
+          <label>
+            <input
+              type="radio"
+              name="loteMode"
+              value="existing"
+              checked={loteMode === "existing"}
+              onChange={() => setLoteMode("existing")}
+              disabled={loading}
+            />
+            Usar capa existente
+          </label>
+          <label>
+            <input
+              type="radio"
+              name="loteMode"
+              value="upload"
+              checked={loteMode === "upload"}
+              onChange={() => setLoteMode("upload")}
+              disabled={loading}
+            />
+            Subir nueva capa
+          </label>
+        </div>
+
+        {loteMode === "existing" ? (
+          hasVectorLayers ? (
+            <select
+              value={selectedLayerId}
+              onChange={(e) => setSelectedLayerId(e.target.value)}
+              disabled={loading}
+            >
+              <option value="">-- Seleccionar capa --</option>
+              {vectorLayers.map((l) => (
+                <option key={l.id} value={l.serverId || l.id}>
+                  {l.name}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <div className="warn-msg">No hay capas vectoriales en el proyecto. Sube una nueva.</div>
+          )
+        ) : (
+          <>
+            <input
+              type="file"
+              accept=".zip,.shp,.kml,.kmz,.geojson,.json,application/vnd.google-earth.kmz,application/vnd.google-earth.kml+xml"
+              onChange={(e) => { setLoteFile(e.target.files?.[0] || null); setUploadedLayerId(""); }}
+              disabled={loading}
+            />
+            <button
+              onClick={handleUploadLote}
+              disabled={!token || !projectId || !loteFile || loading}
+            >
+              Subir lote {loteFile ? `(${loteFile.name})` : ""}
+            </button>
+            {uploadedLayerId && (
+              <div className="status-msg">Capa subida (ID: {uploadedLayerId}) - lista para descarga</div>
+            )}
+          </>
+        )}
+
+        <div className="downloads-explorer">
+          <div className="downloads-explorer-title">Carpeta de descargas Sentinel-2</div>
+          <p className="downloads-hint">
+            Las imagenes descargadas no se añaden solas al mapa. Revise los archivos en la carpeta del proyecto y
+            pulse &quot;Añadir al mapa&quot; en el raster que desee usar.
+          </p>
+          {token && projectId && downloadFiles.length === 0 ? (
+            <div className="status-msg">No hay archivos en la carpeta de descargas (aun).</div>
+          ) : null}
+          {token && projectId && downloadFiles.length > 0 ? (
+            <ul className="downloads-list">
+              {downloadFiles.map((f) => {
+                const canImport = [".tif", ".tiff", ".jp2", ".png", ".jpg", ".jpeg"].includes(f.ext);
+                const mb = f.size_bytes / (1024 * 1024);
+                return (
+                  <li key={f.name} className="downloads-item">
+                    <span className="downloads-name" title={f.name}>{f.name}</span>
+                    <span className="downloads-size">{mb >= 0.1 ? `${mb.toFixed(1)} MB` : `${(f.size_bytes / 1024).toFixed(0)} KB`}</span>
+                    <button
+                      type="button"
+                      className="btn-import-download"
+                      disabled={loading || !canImport || !onImportRasterFromDownloads}
+                      title={canImport ? "Copiar a capas raster del proyecto" : "Descomprima el ZIP y use un .tif/.jp2"}
+                      onClick={() => onImportRasterFromDownloads?.(f.name)}
+                    >
+                      Añadir al mapa
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          ) : null}
+        </div>
+      </fieldset>
+
+      <fieldset className="step-fieldset">
+        <legend>2) Descargar imagen satelital</legend>
+        <select
+          value={downloadSource}
+          onChange={(e) => setDownloadSource(e.target.value)}
+          disabled={loading}
+        >
+          <option value="sentinel-2">Sentinel-2</option>
+          <option value="sentinel-1">Sentinel-1</option>
+          <option value="landsat-8-9">Landsat 8/9</option>
+          <option value="drone">Drone</option>
+        </select>
+
+        {isSentinel2 && (
+          <div className="date-range-fields">
+            <label>
+              Fecha inicio
+              <input
+                type="date"
+                value={startDate}
+                onChange={(e) => setStartDate(e.target.value)}
+                disabled={loading}
+              />
+            </label>
+            <label>
+              Fecha fin
+              <input
+                type="date"
+                value={endDate}
+                onChange={(e) => setEndDate(e.target.value)}
+                disabled={loading}
+              />
+            </label>
+          </div>
+        )}
+
+        <button onClick={handleDownload} disabled={downloadDisabled}>
+          {isSentinel2 ? "Descargar Sentinel-2" : "Ejecutar descarga"}
+        </button>
+
+        {isSentinel2 && s2Download && s2Download.ui_status === "downloading" && (
+          <div className="s2-progress" role="status" aria-live="polite">
+            <div className="s2-progress-label">Descarga Sentinel-2 en curso</div>
+            <div className="s2-progress-bar-wrap">
+              <div
+                className="s2-progress-bar-fill"
+                style={{ width: `${Math.min(100, Math.max(0, s2Download.progress || 0))}%` }}
+              />
+            </div>
+            <div className="s2-progress-msg">{s2Download.message || "Procesando..."}</div>
+          </div>
+        )}
+        {isSentinel2 && s2Download && s2Download.ui_status === "completed" && (
+          <div className="s2-progress s2-progress-done" role="status">
+            <strong>Terminado</strong>
+            <span className="s2-progress-msg">{s2Download.message || "Descarga completada"}</span>
+          </div>
+        )}
+        {isSentinel2 && s2Download && s2Download.ui_status === "failed" && (
+          <div className="s2-progress s2-progress-err" role="alert">
+            <strong>Error</strong>
+            <span className="s2-progress-msg">{s2Download.message || "Fallo la descarga"}</span>
+          </div>
+        )}
+      </fieldset>
+
+      <fieldset className="step-fieldset">
+        <legend>3) Subir raster</legend>
         <input
           type="file"
           accept=".tif,.tiff,.jp2,.png,.jpg,.jpeg"
           onChange={(e) => setRasterFile(e.target.files?.[0] || null)}
           disabled={loading}
         />
-      </label>
-      <button
-        onClick={onUploadRaster}
-        disabled={!token || !projectId || !rasterFile || loading}
-      >
-        Subir raster
-      </button>
-      <label>
-        Raster objetivo ID
-        <input
-          type="number"
-          value={targetRasterId}
-          onChange={(e) => setTargetRasterId(e.target.value)}
-          disabled={loading}
-        />
-      </label>
-
-      <button
-        onClick={onRunAI}
-        disabled={!projectId || !targetRasterId || loading}
-      >
-        Ejecutar IA
-      </button>
+        <button
+          onClick={onUploadRaster}
+          disabled={!token || !projectId || !rasterFile || loading}
+        >
+          Subir raster
+        </button>
+        <label>
+          Raster objetivo ID
+          <input
+            type="number"
+            value={targetRasterId}
+            onChange={(e) => setTargetRasterId(e.target.value)}
+            disabled={loading}
+          />
+        </label>
+        <button
+          onClick={onRunAI}
+          disabled={!projectId || !targetRasterId || loading}
+        >
+          Ejecutar IA
+        </button>
+      </fieldset>
     </>
   );
 }
