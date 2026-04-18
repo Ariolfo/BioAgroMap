@@ -30,11 +30,99 @@ from app.services.sentinel_safe import (
     S2_BANDS_10M_ORDER,
     find_safe_ancestor,
     find_sentinel_r10_band_files,
+    looks_like_sentinel2_product_zip_filename,
     safe_extract_zip,
 )
 from app.tasks.jobs import process_raster, process_s2_zip_layers
 
 router = APIRouter()
+
+
+def _tenant_root_path(tenant_id: int) -> Path:
+    return (Path(settings.storage_path).resolve() / f"tenant_{tenant_id}").resolve()
+
+
+def _project_root_path(tenant_id: int, project_id: int) -> Path:
+    return (Path(settings.storage_path).resolve() / f"tenant_{tenant_id}" / f"project_{project_id}").resolve()
+
+
+def _safe_path_under_tenant(tenant_root: Path, rel: str) -> Path:
+    rel = (rel or "").strip().replace("\\", "/")
+    parts = [p for p in rel.split("/") if p and p != "."]
+    root = tenant_root.resolve()
+    cur = root
+    for p in parts:
+        if p == "..":
+            raise HTTPException(status_code=400, detail="Ruta inválida")
+        cur = (cur / p).resolve()
+    try:
+        cur.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Ruta fuera del tenant") from exc
+    return cur
+
+
+def _safe_path_under_project(project_root: Path, rel: str) -> Path:
+    rel = (rel or "").strip().replace("\\", "/")
+    parts = [p for p in rel.split("/") if p and p != "."]
+    root = project_root.resolve()
+    cur = root
+    for p in parts:
+        if p == "..":
+            raise HTTPException(status_code=400, detail="Ruta inválida")
+        cur = (cur / p).resolve()
+    try:
+        cur.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Ruta fuera del proyecto") from exc
+    return cur
+
+
+def _parent_subpath_for_browse(base_root: Path, current: Path) -> str | None:
+    try:
+        rel = current.resolve().relative_to(base_root.resolve())
+    except ValueError:
+        return None
+    if rel == Path(".") or str(rel) == ".":
+        return None
+    par = rel.parent
+    if par == Path(".") or str(par) == ".":
+        return ""
+    return par.as_posix()
+
+
+def _scan_l2a_products_in_dir(root: Path) -> dict:
+    out: dict = {
+        "downloads_dir": str(root.resolve()),
+        "exists": root.is_dir(),
+        "zip_l2a": [],
+        "safe_folders": [],
+        "other_top_level": [],
+    }
+    if not root.is_dir():
+        return out
+    try:
+        for p in sorted(root.iterdir()):
+            if p.is_file():
+                if p.suffix.lower() == ".zip":
+                    try:
+                        sz = p.stat().st_size
+                    except OSError:
+                        sz = 0
+                    entry: dict = {"name": p.name, "size_bytes": sz}
+                    if not looks_like_sentinel2_product_zip_filename(p.name):
+                        entry["weak_match"] = True
+                    out["zip_l2a"].append(entry)
+                else:
+                    out["other_top_level"].append(p.name)
+            elif p.is_dir():
+                if p.name.upper().endswith(".SAFE"):
+                    out["safe_folders"].append(p.name)
+                else:
+                    out["other_top_level"].append(p.name + "/")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return out
 
 
 def _raster_chronological_sort_key(raster: RasterLayer) -> str:
@@ -84,48 +172,196 @@ def _remove_extract_dir_if_no_other_layers(
         pass
 
 
+@router.get("/raster/tenant-storage-browse")
+def tenant_storage_browse(
+    path: str = Query("", description="Ruta relativa bajo storage/tenant_*/"),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """Lista carpetas y archivos desde la raíz del tenant (p. ej. project_1, project_2, …)."""
+    root = _tenant_root_path(tenant_id)
+    if not root.is_dir():
+        raise HTTPException(status_code=404, detail="Carpeta del tenant no existe en almacenamiento")
+    target = _safe_path_under_tenant(root, path)
+    if not target.is_dir():
+        raise HTTPException(status_code=404, detail="No es una carpeta")
+    entries: list[dict] = []
+    try:
+        for p in sorted(target.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
+            if p.name.startswith("."):
+                continue
+            try:
+                rel_posix = p.resolve().relative_to(root.resolve()).as_posix()
+            except ValueError:
+                continue
+            if p.is_dir():
+                entries.append({"name": p.name, "kind": "dir", "relative_path": rel_posix})
+            else:
+                try:
+                    sz = p.stat().st_size if p.is_file() else 0
+                except OSError:
+                    sz = 0
+                entries.append(
+                    {"name": p.name, "kind": "file", "relative_path": rel_posix, "size_bytes": sz}
+                )
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    try:
+        rel_current = target.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        rel_current = ""
+    parent_subpath = _parent_subpath_for_browse(root, target)
+    return {
+        "tenant_root": str(root),
+        "relative_path": rel_current,
+        "parent_subpath": parent_subpath,
+        "entries": entries,
+    }
+
+
+@router.get("/raster/project-storage-browse/{project_id}")
+def project_storage_browse(
+    project_id: int,
+    path: str = Query("", description="Ruta relativa (posix) bajo la raíz del proyecto"),
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """Lista carpetas y archivos para navegar desde la raíz del proyecto (storage/tenant_*/project_*)."""
+    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    root = _project_root_path(tenant_id, project_id)
+    if not root.is_dir():
+        raise HTTPException(status_code=404, detail="Carpeta del proyecto no existe en almacenamiento")
+    target = _safe_path_under_project(root, path)
+    if not target.is_dir():
+        raise HTTPException(status_code=404, detail="No es una carpeta")
+    entries: list[dict] = []
+    try:
+        for p in sorted(target.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
+            if p.name.startswith("."):
+                continue
+            try:
+                rel_posix = p.resolve().relative_to(root.resolve()).as_posix()
+            except ValueError:
+                continue
+            if p.is_dir():
+                entries.append({"name": p.name, "kind": "dir", "relative_path": rel_posix})
+            else:
+                try:
+                    sz = p.stat().st_size if p.is_file() else 0
+                except OSError:
+                    sz = 0
+                entries.append(
+                    {"name": p.name, "kind": "file", "relative_path": rel_posix, "size_bytes": sz}
+                )
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    try:
+        rel_current = target.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        rel_current = ""
+    parent_subpath = _parent_subpath_for_browse(root, target)
+    return {
+        "project_root": str(root),
+        "relative_path": rel_current,
+        "parent_subpath": parent_subpath,
+        "entries": entries,
+    }
+
+
 @router.get("/raster/project-downloads-inventory/{project_id}")
 def project_downloads_inventory(
     project_id: int,
+    subpath: str | None = Query(
+        None,
+        description="Si se envía, lista L2A en esa ruta bajo el proyecto. Si se omite, carpeta descargas por defecto (downloads/<slug>).",
+    ),
     db: Session = Depends(get_db),
     tenant_id: int = Depends(tenant_from_jwt),
 ):
     """
-    Lista productos L2A en la carpeta de descargas del proyecto: ZIP MSIL2A y carpetas .SAFE,
-    más otros archivos de primer nivel (para comprobar qué hay antes de recortar).
+    Lista productos Sentinel-2 (ZIP y carpetas .SAFE reconocibles, p. ej. L2A/L1C) en el directorio indicado (primer nivel),
+    más otros elementos del mismo nivel.
+    Sin ``subpath``: misma carpeta que hasta ahora (descargas Sentinel por nombre de proyecto).
+    Con ``subpath``: carpeta bajo la raíz del proyecto (p. ej. ``downloads/mi_slug``).
     """
     project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    root = project_downloads_dir(tenant_id, project_id, project.name)
-    out: dict = {
-        "downloads_dir": str(root),
-        "exists": root.is_dir(),
-        "zip_l2a": [],
-        "safe_folders": [],
-        "other_top_level": [],
-    }
-    if not root.is_dir():
-        return out
-    try:
-        for p in sorted(root.iterdir()):
-            if p.is_file():
-                if p.suffix.lower() == ".zip" and "MSIL2A" in p.name.upper():
-                    try:
-                        sz = p.stat().st_size
-                    except OSError:
-                        sz = 0
-                    out["zip_l2a"].append({"name": p.name, "size_bytes": sz})
-                else:
-                    out["other_top_level"].append(p.name)
-            elif p.is_dir():
-                if p.name.upper().endswith(".SAFE") and "MSIL2A" in p.name.upper():
-                    out["safe_folders"].append(p.name)
-                else:
-                    out["other_top_level"].append(p.name + "/")
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if subpath is None:
+        root = project_downloads_dir(tenant_id, project_id, project.name)
+    else:
+        pr = _project_root_path(tenant_id, project_id)
+        root = _safe_path_under_project(pr, subpath)
+    out = _scan_l2a_products_in_dir(root)
+    out["source_subpath"] = None if subpath is None else subpath
     return out
+
+
+def _merge_copy_downloads_dir(src: Path, dst: Path) -> int:
+    """
+    Copia el contenido de ``src`` dentro de ``dst``, fusionando carpetas con el mismo nombre.
+    Devuelve el número de archivos copiados (incluye archivos dentro de árboles copiados con copytree).
+    """
+    n_files = 0
+    dst.mkdir(parents=True, exist_ok=True)
+    for child in sorted(src.iterdir()):
+        if child.name.startswith("."):
+            continue
+        target = dst / child.name
+        if child.is_file():
+            shutil.copy2(child, target)
+            n_files += 1
+        elif child.is_dir():
+            if target.exists():
+                if not target.is_dir():
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Conflicto: «{child.name}» existe como archivo en destino y como carpeta en origen.",
+                    )
+                n_files += _merge_copy_downloads_dir(child, target)
+            else:
+                shutil.copytree(child, target)
+                n_files += sum(1 for p in child.rglob("*") if p.is_file())
+        else:
+            continue
+    return n_files
+
+
+@router.post("/raster/copy-downloads-from-project")
+def copy_downloads_from_project(
+    source_project_id: int = Query(..., description="Proyecto origen (tiene las descargas)"),
+    target_project_id: int = Query(..., description="Proyecto destino (proyecto actual)"),
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """
+    Copia el contenido de ``downloads/<slug>`` del proyecto origen sobre la carpeta de descargas del proyecto destino
+    (mismo tenant). No elimina archivos previos en destino; fusiona por nombre.
+    """
+    if source_project_id == target_project_id:
+        raise HTTPException(status_code=400, detail="El origen y el destino deben ser proyectos distintos.")
+    src_project = db.query(Project).filter(Project.id == source_project_id, Project.tenant_id == tenant_id).first()
+    tgt_project = db.query(Project).filter(Project.id == target_project_id, Project.tenant_id == tenant_id).first()
+    if not src_project or not tgt_project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    src_dir = project_downloads_dir(tenant_id, source_project_id, src_project.name)
+    tgt_dir = project_downloads_dir(tenant_id, target_project_id, tgt_project.name)
+    if not src_dir.is_dir():
+        raise HTTPException(
+            status_code=404,
+            detail="El proyecto origen no tiene carpeta de descargas (downloads).",
+        )
+    if not any(src_dir.iterdir()):
+        raise HTTPException(status_code=400, detail="La carpeta de descargas del proyecto origen está vacía.")
+    n_files = _merge_copy_downloads_dir(src_dir, tgt_dir)
+    return {
+        "ok": True,
+        "source_project_id": source_project_id,
+        "target_project_id": target_project_id,
+        "files_copied": n_files,
+        "target_downloads_dir": str(tgt_dir.resolve()),
+    }
 
 
 @router.get("/raster/project-downloads/{project_id}")

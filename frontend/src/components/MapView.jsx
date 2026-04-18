@@ -135,7 +135,10 @@ export default function MapView({
         }
         if (rasterFetchInFlightRef.current.has(l.id)) return;
 
-        const previewUrl = `${base}/raster/${projectId}/${l.serverId}/preview?v=${l.serverId}`;
+        const meta = l.metadata || {};
+        const palQ =
+          meta.s2_index_stack === true ? "&index_palette=1" : "";
+        const previewUrl = `${base}/raster/${projectId}/${l.serverId}/preview?v=${l.serverId}${palQ}`;
         rasterFetchInFlightRef.current.add(l.id);
         fetch(previewUrl, {
           headers: { Authorization: `Bearer ${token}` },

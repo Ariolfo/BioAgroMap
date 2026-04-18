@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import AuthPanel from "./AuthPanel";
 import ProjectList from "./ProjectList";
 import LayersPanel from "./LayersPanel";
@@ -18,7 +18,6 @@ export default function Sidebar({
   projectName,
   setProjectName,
   mapLayers,
-  dirty,
   targetRasterId,
   setTargetRasterId,
   loteFile,
@@ -30,6 +29,7 @@ export default function Sidebar({
   selectedIndices,
   setSelectedIndices,
   indexStacksBusy,
+  visualIndexGalleryKick = 0,
   stackMode,
   setStackMode,
   onLogin,
@@ -37,31 +37,37 @@ export default function Sidebar({
   onLogout,
   onSelectProject,
   onCreateProject,
+  onUpdateProject,
   onDeleteProject,
   onToggleVisibility,
   onZoomToLayer,
-  onRemoveLayer,
-  onSave,
+  onHideLayer,
   onUploadLote,
   onUploadRaster,
   onRunAI,
   onDownload,
   recortePipelineBusy,
-  onFetchS2Inventory,
   onS2L2aRecortes,
   onS2IndexStacks,
-  onStack,
   clusterElbowLoading,
   clusterGmmLoading,
   clusterElbowResults,
   clusterGmmResults,
   onClusterElbow,
   onClusterGmm,
+  onLoadPersistedClusterGmm,
   s2Download,
 }) {
   const [activeTab, setActiveTab] = useState("admin");
   const [panelOpen, setPanelOpen] = useState(true);
   const [layersPanelOpen, setLayersPanelOpen] = useState(false);
+
+  useEffect(() => {
+    if (!visualIndexGalleryKick) return;
+    setActiveTab("prepro");
+    setPanelOpen(true);
+    setLayersPanelOpen(false);
+  }, [visualIndexGalleryKick]);
 
   return (
     <aside className="panel">
@@ -122,13 +128,9 @@ export default function Sidebar({
       {layersPanelOpen ? (
         <LayersPanel
           mapLayers={mapLayers}
-          projectId={projectId}
-          dirty={dirty}
-          loading={loading}
           onToggleVisibility={onToggleVisibility}
           onZoomToLayer={onZoomToLayer}
-          onRemoveLayer={onRemoveLayer}
-          onSave={onSave}
+          onHideLayer={onHideLayer}
         />
       ) : null}
 
@@ -153,6 +155,7 @@ export default function Sidebar({
               loading={loading}
               onSelectProject={onSelectProject}
               onCreateProject={onCreateProject}
+              onUpdateProject={onUpdateProject}
               onDeleteProject={onDeleteProject}
               onLogout={onLogout}
               email={email}
@@ -195,16 +198,16 @@ export default function Sidebar({
           mapLayers={mapLayers}
           recortePipelineBusy={recortePipelineBusy}
           indexStacksBusy={indexStacksBusy}
-          onFetchS2Inventory={onFetchS2Inventory}
+          visualIndexGalleryKick={visualIndexGalleryKick}
           onS2L2aRecortes={onS2L2aRecortes}
           onS2IndexStacks={onS2IndexStacks}
-          onStack={onStack}
           clusterElbowLoading={clusterElbowLoading}
           clusterGmmLoading={clusterGmmLoading}
           clusterElbowResults={clusterElbowResults}
           clusterGmmResults={clusterGmmResults}
           onClusterElbow={onClusterElbow}
           onClusterGmm={onClusterGmm}
+          onLoadPersistedClusterGmm={onLoadPersistedClusterGmm}
         />
       ) : null}
 

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import api, { API_URL, setAuthToken } from "../api";
+import api, { API_URL, formatApiErrorDetail, setAuthToken } from "../api";
 import {
   formatRecorteDisplayName,
   rasterSortKeyFromMetadata,
@@ -41,23 +41,28 @@ function filterSixBandStackRasters(rows) {
   });
 }
 
-/** Stacks multibanda de un índice (capa registrada tras «Estimar índice»). */
-function filterIndexVisualRasters(rows, indexKey) {
-  if (!indexKey) return [];
-  return rows.filter((r) => {
-    const m = r.metadata || {};
-    if (isLegacyS2ZipBandRaster(m)) return false;
-    if (!m.bounds_wgs84) return false;
-    return m.s2_index_stack === true && m.vegetation_index_key === indexKey;
-  });
-}
-
 function formatIsoDateDdMmYyyy(iso) {
   if (typeof iso !== "string" || iso.length < 10) return iso || "";
   const [y, mo, d] = iso.split("-");
   if (!y || !mo || !d) return iso;
   return `${d.padStart(2, "0")}/${mo.padStart(2, "0")}/${y}`;
 }
+
+/** Etiqueta corta solo con fecha (dd/mm/aaaa) para escenas en recortes/. */
+function formatSceneDateLabel(sortKey) {
+  if (typeof sortKey !== "string" || !sortKey) return "—";
+  const head = sortKey.slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(head)) {
+    return formatIsoDateDdMmYyyy(head);
+  }
+  return "—";
+}
+
+const RECORTE_PREVIEW_PLACEHOLDER =
+  "data:image/svg+xml," +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="150"><rect fill="#2a2a2a" width="100%" height="100%"/><text x="50%" y="50%" fill="#999" font-size="12" text-anchor="middle" font-family="system-ui,sans-serif">Sin vista previa</text></svg>'
+  );
 
 /** Miniaturas a pedir: una por banda/fecha en stacks de índice; una por capa en RGB. */
 function previewSpecsForRaster(r) {
@@ -87,7 +92,7 @@ const ZOOM_STEP = 0.1;
 const GALLERY_INDEX_KEYS = ["NDVI", "EVI", "NDWI", "CIre", "MCARI"];
 
 /**
- * @param {"view" | "indexSelect"} mode - view: galería; indexSelect: elegir escenas y estimar índices
+ * @param {"view" | "indexSelect" | "timeSeriesSelect"} mode - view: galería; indexSelect: escenas → índices; timeSeriesSelect: escenas → series de tiempo
  * @param {"rgb" | "index"} [galleryVisualMode] - view: RGB L2A vs stacks de índice (pestañas NDVI…)
  */
 export default function RgbTimeSeriesGallery({
@@ -95,8 +100,13 @@ export default function RgbTimeSeriesGallery({
   onClose,
   mode = "view",
   onEstimateIndices,
+  onTimeSeries,
   canEstimate = true,
   galleryVisualMode = "rgb",
+  /** Catálogo de índices (paso 3): checkboxes en la ventana si mode === indexSelect */
+  indexCatalog = null,
+  selectedIndices = [],
+  onSelectedIndicesChange,
   projectId,
   token,
 }) {
@@ -106,10 +116,38 @@ export default function RgbTimeSeriesGallery({
   const [zoom, setZoom] = useState(1);
   const [selectedIds, setSelectedIds] = useState(() => new Set());
   const [activeIndexKey, setActiveIndexKey] = useState("NDVI");
+  const [indexInfoKey, setIndexInfoKey] = useState(null);
   const blobUrlsRef = useRef([]);
   const scrollRef = useRef(null);
 
-  const indexMode = mode === "indexSelect";
+  const mainIndexIds =
+    indexCatalog?.filter((o) => o.id !== "TODOS").map((o) => o.id) ?? [];
+  const allMainIndicesSelected =
+    mainIndexIds.length > 0 && mainIndexIds.every((id) => selectedIndices.includes(id));
+
+  function toggleTodosIndices() {
+    if (!onSelectedIndicesChange) return;
+    if (allMainIndicesSelected) {
+      onSelectedIndicesChange([]);
+    } else {
+      onSelectedIndicesChange([...mainIndexIds]);
+    }
+  }
+
+  function toggleOneIndex(id) {
+    if (!onSelectedIndicesChange) return;
+    if (id === "TODOS") {
+      toggleTodosIndices();
+      return;
+    }
+    if (selectedIndices.includes(id)) {
+      onSelectedIndicesChange(selectedIndices.filter((x) => x !== id));
+    } else {
+      onSelectedIndicesChange([...selectedIndices, id]);
+    }
+  }
+
+  const indexMode = mode === "indexSelect" || mode === "timeSeriesSelect";
   const showIndexSwitcher = !indexMode && galleryVisualMode === "index";
 
   useEffect(() => {
@@ -136,66 +174,159 @@ export default function RgbTimeSeriesGallery({
       setLoading(true);
       try {
         setAuthToken(token);
-        const res = await api.get(`/raster/${projectId}`);
-        if (cancelled) return;
-        const raw = res.data || [];
-        let rows;
-        if (indexMode) {
-          rows = filterSixBandStackRasters(raw);
-        } else if (galleryVisualMode === "index" && activeIndexKey) {
-          rows = filterIndexVisualRasters(raw, activeIndexKey);
-        } else {
-          rows = filterGalleryRasters(raw);
-        }
-        rows = [...rows].sort((a, b) => {
-          const ka = rasterSortKeyFromMetadata(a.metadata);
-          const kb = rasterSortKeyFromMetadata(b.metadata);
-          const c = ka.localeCompare(kb);
-          if (c !== 0) return c;
-          return (a.id || 0) - (b.id || 0);
-        });
-
         const base = API_URL.replace(/\/$/, "");
         const loaded = [];
 
-        for (const r of rows) {
-          if (cancelled) break;
-          const specs = previewSpecsForRaster(r);
-          const m = r.metadata || {};
-          const idxName = m.vegetation_index_key || activeIndexKey || "";
-
-          for (const spec of specs) {
+        if (mode === "indexSelect" || mode === "timeSeriesSelect") {
+          const invRes = await api.get(`/preprocess/recortes-inventory/${projectId}`);
+          if (cancelled) return;
+          const rows = invRes.data?.items || [];
+          for (const row of rows) {
             if (cancelled) break;
-            const bandQ =
-              spec.band != null ? `&band=${spec.band}` : "";
-            const paletteQ =
-              galleryVisualMode === "index" ? "&index_palette=1" : "";
-            const url = `${base}/raster/${projectId}/${r.id}/preview?v=${r.id}${bandQ}${paletteQ}`;
+            const basename = row.basename;
+            const rel = row.relative_path || basename;
+            if (!rel) continue;
+            const rid = row.raster_layer_id;
+            const sk = row.sort_key || "";
+            const url = rid
+              ? `${base}/raster/${projectId}/${rid}/preview?v=${rid}`
+              : `${base}/preprocess/recortes-preview/${projectId}?path=${encodeURIComponent(rel)}`;
+            let objectUrl = null;
             try {
               const resp = await fetch(url, {
                 headers: { Authorization: `Bearer ${token}` },
                 cache: "no-store",
               });
-              if (!resp.ok) continue;
-              const blob = await resp.blob();
-              const objectUrl = URL.createObjectURL(blob);
-              blobUrlsRef.current.push(objectUrl);
-              let label =
-                formatRecorteDisplayName(r.metadata, r.name) || r.name;
-              if (m.s2_index_stack && spec.labelSuffix) {
-                label = `${idxName} · ${spec.labelSuffix}`;
+              if (resp.ok) {
+                const blob = await resp.blob();
+                objectUrl = URL.createObjectURL(blob);
+                blobUrlsRef.current.push(objectUrl);
               }
-              const itemId =
-                spec.band != null ? `${r.id}-b${spec.band}` : r.id;
-              loaded.push({
-                id: itemId,
-                rasterLayerId: r.id,
-                label,
-                src: objectUrl,
-                raw: r,
-              });
             } catch (_) {
-              /* omitir capa sin preview */
+              /* se muestra placeholder */
+            }
+            const label = formatSceneDateLabel(sk);
+            loaded.push({
+              id: `inv:${rel}`,
+              rasterLayerId: rid ?? null,
+              basename,
+              relativePath: rel,
+              label,
+              src: objectUrl,
+              raw: row,
+            });
+          }
+        } else if (mode === "view" && galleryVisualMode === "index") {
+          const invRes = await api.get(`/preprocess/index-stacks-inventory/${projectId}`);
+          if (cancelled) return;
+          const allRows = invRes.data?.items || [];
+          const normIdx = (k) => String(k || "").toUpperCase();
+          const ak = normIdx(activeIndexKey);
+          const rows = allRows.filter((row) => normIdx(row.index_key) === ak);
+          for (const row of rows) {
+            if (cancelled) break;
+            const nb = Number(row.bands);
+            const dates = Array.isArray(row.band_dates) ? row.band_dates : [];
+            const specs =
+              Number.isFinite(nb) && nb >= 1
+                ? Array.from({ length: nb }, (_, i) => {
+                    const d = dates[i];
+                    let labelSuffix = `banda ${i + 1}`;
+                    if (typeof d === "string" && d.length >= 10) {
+                      labelSuffix = formatIsoDateDdMmYyyy(d.slice(0, 10));
+                    }
+                    return { band: i + 1, labelSuffix };
+                  })
+                : [{ band: 1, labelSuffix: "" }];
+            const idxName = row.index_key || activeIndexKey || "";
+            for (const spec of specs) {
+              if (cancelled) break;
+              const bandQ = spec.band != null ? `&band=${spec.band}` : "";
+              const url = `${base}/preprocess/index-stacks-preview/${projectId}?path=${encodeURIComponent(
+                row.relative_path
+              )}${bandQ}&index_palette=1`;
+              try {
+                const resp = await fetch(url, {
+                  headers: { Authorization: `Bearer ${token}` },
+                  cache: "no-store",
+                });
+                if (!resp.ok) continue;
+                const blob = await resp.blob();
+                const objectUrl = URL.createObjectURL(blob);
+                blobUrlsRef.current.push(objectUrl);
+                const label =
+                  spec.labelSuffix && idxName
+                    ? `${idxName} · ${spec.labelSuffix}`
+                    : idxName || spec.labelSuffix;
+                loaded.push({
+                  id: `idx:${row.relative_path}-b${spec.band}`,
+                  rasterLayerId: null,
+                  label,
+                  src: objectUrl,
+                  raw: row,
+                });
+              } catch (_) {
+                /* omitir */
+              }
+            }
+          }
+        } else {
+          const res = await api.get(`/raster/${projectId}`);
+          if (cancelled) return;
+          const raw = res.data || [];
+          let rows;
+          if (indexMode) {
+            rows = filterSixBandStackRasters(raw);
+          } else {
+            rows = filterGalleryRasters(raw);
+          }
+          rows = [...rows].sort((a, b) => {
+            const ka = rasterSortKeyFromMetadata(a.metadata);
+            const kb = rasterSortKeyFromMetadata(b.metadata);
+            const c = ka.localeCompare(kb);
+            if (c !== 0) return c;
+            return (a.id || 0) - (b.id || 0);
+          });
+
+          for (const r of rows) {
+            if (cancelled) break;
+            const specs = previewSpecsForRaster(r);
+            const m = r.metadata || {};
+            const idxName = m.vegetation_index_key || activeIndexKey || "";
+
+            for (const spec of specs) {
+              if (cancelled) break;
+              const bandQ =
+                spec.band != null ? `&band=${spec.band}` : "";
+              const paletteQ =
+                galleryVisualMode === "index" ? "&index_palette=1" : "";
+              const url = `${base}/raster/${projectId}/${r.id}/preview?v=${r.id}${bandQ}${paletteQ}`;
+              try {
+                const resp = await fetch(url, {
+                  headers: { Authorization: `Bearer ${token}` },
+                  cache: "no-store",
+                });
+                if (!resp.ok) continue;
+                const blob = await resp.blob();
+                const objectUrl = URL.createObjectURL(blob);
+                blobUrlsRef.current.push(objectUrl);
+                let label =
+                  formatRecorteDisplayName(r.metadata, r.name) || r.name;
+                if (m.s2_index_stack && spec.labelSuffix) {
+                  label = `${idxName} · ${spec.labelSuffix}`;
+                }
+                const itemId =
+                  spec.band != null ? `${r.id}-b${spec.band}` : r.id;
+                loaded.push({
+                  id: itemId,
+                  rasterLayerId: r.id,
+                  label,
+                  src: objectUrl,
+                  raw: r,
+                });
+              } catch (_) {
+                /* omitir capa sin preview */
+              }
             }
           }
         }
@@ -203,7 +334,7 @@ export default function RgbTimeSeriesGallery({
         if (!cancelled) setItems(loaded);
       } catch (e) {
         if (!cancelled) {
-          setError(e?.response?.data?.detail || e.message || "Error al cargar capas");
+          setError(formatApiErrorDetail(e) || "Error al cargar capas");
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -215,7 +346,7 @@ export default function RgbTimeSeriesGallery({
       blobUrlsRef.current.forEach((u) => URL.revokeObjectURL(u));
       blobUrlsRef.current = [];
     };
-  }, [open, projectId, token, indexMode, galleryVisualMode, activeIndexKey]);
+  }, [open, projectId, token, mode, indexMode, galleryVisualMode, activeIndexKey]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -275,7 +406,7 @@ export default function RgbTimeSeriesGallery({
   }
 
   function selectAllScenes() {
-    setSelectedIds(new Set(items.map((it) => it.rasterLayerId ?? it.id)));
+    setSelectedIds(new Set(items.map((it) => it.id)));
   }
 
   function clearSelection() {
@@ -284,23 +415,64 @@ export default function RgbTimeSeriesGallery({
 
   function handleEstimate() {
     if (!onEstimateIndices || !canEstimate) return;
-    const ids = [...selectedIds].sort((a, b) => a - b);
-    if (ids.length === 0) return;
-    onEstimateIndices(ids);
+    if (mode === "indexSelect") {
+      const names = [...selectedIds]
+        .map((id) => {
+          const s = String(id);
+          return s.startsWith("inv:") ? s.slice(4) : null;
+        })
+        .filter(Boolean);
+      const uniq = [...new Set(names)];
+      if (uniq.length === 0) return;
+      onEstimateIndices({ recorteFilenames: uniq });
+      return;
+    }
+    const raw = [...selectedIds].map((id) => Number(id));
+    const uniq = [...new Set(raw.filter((n) => Number.isFinite(n) && n >= 1))].sort((a, b) => a - b);
+    if (uniq.length === 0) return;
+    onEstimateIndices(uniq);
+  }
+
+  function handleTimeSeriesClick() {
+    if (!onTimeSeries) return;
+    const ids = [];
+    for (const sid of selectedIds) {
+      const item = items.find((i) => i.id === sid);
+      if (item?.rasterLayerId != null && Number.isFinite(Number(item.rasterLayerId))) {
+        ids.push(Number(item.rasterLayerId));
+        continue;
+      }
+      const s = String(sid);
+      const m = s.match(/^(\d+)-b\d+$/);
+      const n = Number(m ? m[1] : s);
+      if (Number.isFinite(n) && n >= 1) ids.push(n);
+    }
+    const uniq = [...new Set(ids)].sort((a, b) => a - b);
+    if (uniq.length === 0) return;
+    onTimeSeries(uniq);
   }
 
   if (!open) return null;
 
-  const title = indexMode
-    ? "Escenas L2A (6 bandas) — selección para índices"
-    : showIndexSwitcher
-      ? "Visual índices — serie temporal"
-      : "Visual RGB — serie temporal";
+  const title =
+    mode === "timeSeriesSelect"
+      ? "Escenas L2A (6 bandas) — series de tiempo"
+      : mode === "indexSelect"
+        ? "Escenas L2A (6 bandas) — selección para índices"
+        : showIndexSwitcher
+          ? "Visual índices — serie temporal"
+          : "Visual RGB — serie temporal";
 
-  const subtitle = indexMode ? (
+  const subtitle =
+    mode === "timeSeriesSelect" ? (
+      <>
+        Pulsa cada miniatura para incluir o excluir escenas. Cuando termines, pulsa{" "}
+        <strong>Series de tiempo</strong> para graficar NDVI, EVI, NDWI, CIre y MCARI (fechas en el eje X).
+      </>
+    ) : indexMode ? (
     <>
-      Pulsa cada miniatura para incluir o excluir la escena. Solo se listan capas con recorte L2A de 6
-      bandas (mismo <code>.tif</code> que usa el backend). Luego pulsa <strong>Estimar índice</strong>.
+      Marca los <strong>índices</strong> (arriba) y las <strong>escenas</strong> (cada una corresponde a un
+      GeoTIFF en <code>recortes/</code>). La estimación usa <strong>solo las escenas seleccionadas</strong>.
     </>
   ) : showIndexSwitcher ? (
     <>
@@ -320,11 +492,19 @@ export default function RgbTimeSeriesGallery({
     </>
   );
 
-  const emptyMsg = indexMode
-    ? "No hay capas de recorte L2A (6 bandas) en el proyecto. Ejecuta el paso 1 (Procesar recortes L2A)."
-    : showIndexSwitcher
-      ? `No hay stack de ${activeIndexKey}. En el paso 3, selecciona escenas, marca ese índice y pulsa Estimar índice.`
-      : "No hay capas raster con vista RGB en este proyecto. Procesa recortes L2A en el paso 1 o sube un GeoTIFF Sentinel-2.";
+  const emptyMsg =
+    mode === "indexSelect" || mode === "timeSeriesSelect"
+      ? "No hay GeoTIFF L2A (6+ bandas) en la carpeta recortes/. Ejecuta el paso 1 (Procesar recortes L2A)."
+      : indexMode
+        ? "No hay capas de recorte L2A (6 bandas) en el proyecto. Ejecuta el paso 1 (Procesar recortes L2A)."
+        : showIndexSwitcher
+          ? `No hay stack de ${activeIndexKey} en disco (carpeta indices/${activeIndexKey}/). Usa el paso 3 (Estimar índices).`
+          : "No hay capas raster con vista RGB en este proyecto. Procesa recortes L2A en el paso 1 o sube un GeoTIFF Sentinel-2.";
+
+  const infoEntry =
+    indexInfoKey && indexCatalog?.length
+      ? indexCatalog.find((x) => x.id === indexInfoKey)
+      : null;
 
   return (
     <div className="rgb-gallery-overlay" role="dialog" aria-modal="true" aria-label={title}>
@@ -337,6 +517,42 @@ export default function RgbTimeSeriesGallery({
           </button>
         </div>
         <p className="rgb-gallery-sub">{subtitle}</p>
+        {mode === "indexSelect" && indexCatalog?.length ? (
+          <div
+            className="rgb-gallery-index-picker"
+            role="group"
+            aria-label="Índices de vegetación a estimar"
+          >
+            <div className="rgb-gallery-index-picker-title">Índices a incluir en el stack</div>
+            <div className="rgb-gallery-index-picker-grid">
+              {indexCatalog.map((opt) => (
+                <label key={opt.id} className="rgb-gallery-index-option">
+                  <input
+                    type="checkbox"
+                    checked={
+                      opt.id === "TODOS" ? allMainIndicesSelected : selectedIndices.includes(opt.id)
+                    }
+                    onChange={() => toggleOneIndex(opt.id)}
+                  />
+                  <span className="rgb-gallery-index-option-label">{opt.label}</span>
+                  <button
+                    type="button"
+                    className="indices-info-btn"
+                    title="Descripción técnica"
+                    aria-label={`Información sobre ${opt.label}`}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setIndexInfoKey(opt.id);
+                    }}
+                  >
+                    i
+                  </button>
+                </label>
+              ))}
+            </div>
+          </div>
+        ) : null}
         {showIndexSwitcher && (
           <div className="rgb-gallery-index-switcher" role="toolbar" aria-label="Índice a visualizar">
             <button
@@ -438,7 +654,8 @@ export default function RgbTimeSeriesGallery({
               >
                 <div className="rgb-gallery-grid">
                   {items.map((it) => {
-                    const sel = indexMode && selectedIds.has(it.rasterLayerId ?? it.id);
+                    const selId = it.id;
+                    const sel = indexMode && selectedIds.has(selId);
                     return (
                       <figure
                         key={it.id}
@@ -450,7 +667,7 @@ export default function RgbTimeSeriesGallery({
                               type="checkbox"
                               className="rgb-gallery-cell-check"
                               checked={sel}
-                              onChange={() => toggleSelect(it.rasterLayerId ?? it.id)}
+                              onChange={() => toggleSelect(selId)}
                               aria-label={`Incluir escena ${it.label}`}
                             />
                           )}
@@ -461,21 +678,21 @@ export default function RgbTimeSeriesGallery({
                           role={indexMode ? "button" : undefined}
                           tabIndex={indexMode ? 0 : undefined}
                           onClick={
-                            indexMode ? () => toggleSelect(it.rasterLayerId ?? it.id) : undefined
+                            indexMode ? () => toggleSelect(selId) : undefined
                           }
                           onKeyDown={
                             indexMode
                               ? (e) => {
                                   if (e.key === "Enter" || e.key === " ") {
                                     e.preventDefault();
-                                    toggleSelect(it.rasterLayerId ?? it.id);
+                                    toggleSelect(selId);
                                   }
                                 }
                               : undefined
                           }
                         >
                           <img
-                            src={it.src}
+                            src={it.src || RECORTE_PREVIEW_PLACEHOLDER}
                             alt={it.label}
                             className="rgb-gallery-thumb"
                             loading="lazy"
@@ -492,7 +709,7 @@ export default function RgbTimeSeriesGallery({
                 </div>
               </div>
             </div>
-            {indexMode && (
+            {mode === "timeSeriesSelect" && (
               <div className="rgb-gallery-footer-actions">
                 <button type="button" className="rgb-gallery-btn-secondary" onClick={onClose}>
                   Cancelar
@@ -500,25 +717,69 @@ export default function RgbTimeSeriesGallery({
                 <button
                   type="button"
                   className="rgb-gallery-btn-primary"
-                  onClick={handleEstimate}
-                  disabled={
-                    !canEstimate || selectedIds.size === 0 || !onEstimateIndices
-                  }
+                  onClick={handleTimeSeriesClick}
+                  disabled={selectedIds.size === 0 || !onTimeSeries}
                   title={
-                    !canEstimate
-                      ? "Elige al menos un índice (NDVI, EVI, …) en el panel Procesos"
-                      : selectedIds.size === 0
-                        ? "Selecciona al menos una escena"
-                        : undefined
+                    selectedIds.size === 0 ? "Selecciona al menos una escena" : undefined
                   }
                 >
-                  Estimar índice
+                  Series de tiempo
                 </button>
               </div>
             )}
           </>
         )}
+        {mode === "indexSelect" && (
+          <div className="rgb-gallery-footer-actions">
+            <button type="button" className="rgb-gallery-btn-secondary" onClick={onClose}>
+              Cancelar
+            </button>
+            <button
+              type="button"
+              className="rgb-gallery-btn-primary"
+              onClick={handleEstimate}
+              disabled={
+                loading || !canEstimate || selectedIds.size === 0 || !onEstimateIndices
+              }
+              title={
+                loading
+                  ? "Cargando vistas…"
+                  : !canEstimate
+                    ? "Marca al menos un índice arriba (NDVI, EVI, …)"
+                    : selectedIds.size === 0
+                      ? "Selecciona al menos una escena (recorte L2A en recortes/)"
+                      : undefined
+              }
+            >
+              Estimar índice
+            </button>
+          </div>
+        )}
       </div>
+      {infoEntry ? (
+        <div
+          className="index-modal-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="rgb-gallery-info-title"
+          onClick={() => setIndexInfoKey(null)}
+        >
+          <div className="index-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="index-modal-header">
+              <h3 id="rgb-gallery-info-title">{infoEntry.label}</h3>
+              <button
+                type="button"
+                className="index-modal-close"
+                onClick={() => setIndexInfoKey(null)}
+                aria-label="Cerrar"
+              >
+                ×
+              </button>
+            </div>
+            <p className="index-modal-body">{infoEntry.description}</p>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

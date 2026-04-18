@@ -34,6 +34,55 @@ def _safe_key_from_stem(stem: str) -> str:
     return s[:100] if s else "recorte"
 
 
+def _sentinel_date_dd_mm_yyyy_from_filename(filename: str) -> Optional[str]:
+    """
+    Sentinel-2 típico: …_YYYYMMDDThhmmss_… en el nombre del producto.
+    Devuelve dd/mm/YYYY o None si no hay patrón reconocible.
+    """
+    m = re.search(r"_(\d{8})T\d{6}_", filename)
+    if not m:
+        m = re.search(r"_(\d{8})T", filename)
+    if not m:
+        return None
+    s = m.group(1)
+    try:
+        y = int(s[0:4])
+        mo = int(s[4:6])
+        d = int(s[6:8])
+        if mo < 1 or mo > 12 or d < 1 or d > 31:
+            return None
+        return f"{d:02d}/{mo:02d}/{y}"
+    except (ValueError, IndexError):
+        return None
+
+
+def _label_for_recorte_tif(p: Path, nband: int) -> str:
+    """Título corto solo para .tif con exactamente 6 bandas (recortes L2A)."""
+    if nband == 6 and p.suffix.lower() == ".tif":
+        dstr = _sentinel_date_dd_mm_yyyy_from_filename(p.name)
+        if dstr:
+            return dstr
+    if nband >= 6:
+        return f"Recorte {nband} bandas · {p.name}"
+    return p.name
+
+
+def _elbow_plot_title_for_path(path: Path) -> str:
+    """Título del PNG del codo: solo fecha para recortes 6 bandas .tif con fecha en nombre."""
+    try:
+        if path.suffix.lower() != ".tif":
+            return f"Codo — {path.parent.name} / {path.name}"
+        with rasterio.open(path) as src:
+            nband = int(src.count)
+    except Exception:
+        return f"Codo — {path.parent.name} / {path.name}"
+    if nband == 6:
+        dstr = _sentinel_date_dd_mm_yyyy_from_filename(path.name)
+        if dstr:
+            return dstr
+    return f"Codo — {path.parent.name} / {path.name}"
+
+
 def clear_cluster_gmm_dir(out_dir: Path) -> tuple[int, str]:
     """
     Elimina todo el contenido de ``cluster_gmm/`` antes de una nueva corrida GMM.
@@ -139,7 +188,7 @@ def discover_cluster_datasets(recortes_root: Path, indices_root: Path) -> list[d
                     "key": key,
                     "kind": "multiband",
                     "path": str(p.resolve()),
-                    "label": f"Recorte 6 bandas · {p.name}",
+                    "label": _label_for_recorte_tif(p, nband),
                 }
             )
         logger.info(
@@ -355,7 +404,13 @@ def _labels_to_rgb_preview(labels_2d: np.ndarray, nodata: int = -1) -> np.ndarra
 
 
 def plot_cluster_map_png(labels: np.ndarray, title: str) -> str:
-    """PNG base64 de mapa categórico (baja resolución si hace falta)."""
+    """
+    PNG base64 de mapa categórico (baja resolución si hace falta).
+
+    El tamaño de figura sigue el aspect ratio del raster para evitar franjas laterales
+    (fondo #1a1a1a) en recortes muy alargados. ``title`` se conserva en la firma por
+    compatibilidad; el título se muestra en la UI (modal / panel), no dentro del PNG.
+    """
     import matplotlib
 
     matplotlib.use("Agg")
@@ -375,14 +430,32 @@ def plot_cluster_map_png(labels: np.ndarray, title: str) -> str:
     else:
         rgb = _labels_to_rgb_preview(labels)
 
-    fig, ax = plt.subplots(figsize=(6, 5), dpi=100, facecolor="#1a1a1a")
+    nh, nw = rgb.shape[0], rgb.shape[1]
+    ar = nw / float(max(nh, 1))
+    # Misma proporción ancho/alto que la imagen (pulgadas); evita bandas negras a los lados.
+    max_dim = 6.0
+    if nh >= nw:
+        h_in = max_dim
+        w_in = max_dim * ar
+    else:
+        w_in = max_dim
+        h_in = max_dim / max(ar, 1e-6)
+    w_in = max(w_in, 0.25)
+    h_in = max(h_in, 0.25)
+
+    fig, ax = plt.subplots(figsize=(w_in, h_in), dpi=100, facecolor="#1a1a1a")
     ax.set_facecolor("#1a1a1a")
-    ax.imshow(rgb)
-    ax.set_title(title, color="w", fontsize=11)
-    ax.axis("off")
+    ax.imshow(rgb, interpolation="nearest")
+    ax.set_axis_off()
+    plt.subplots_adjust(0, 0, 1, 1, 0, 0)
     buf = io.BytesIO()
-    fig.tight_layout()
-    fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0.08, facecolor="#1a1a1a")
+    fig.savefig(
+        buf,
+        format="png",
+        bbox_inches="tight",
+        pad_inches=0.02,
+        facecolor="#1a1a1a",
+    )
     plt.close(fig)
     buf.seek(0)
     return base64.b64encode(buf.read()).decode("ascii")
@@ -516,7 +589,7 @@ def run_elbow_for_dataset(
     )
     ks, inertias = compute_elbow_inertias(Xs, k_min, k_max, random_state=random_state)
     k_sug = suggest_k_elbow(ks, inertias)
-    title = f"Codo — {path.parent.name} / {path.name}"
+    title = _elbow_plot_title_for_path(path)
     png_b64 = plot_elbow_png(ks, inertias, title)
     return {
         "ks": ks,
@@ -526,6 +599,88 @@ def run_elbow_for_dataset(
         "n_features": int(Xs.shape[1]),
         "n_train_pixels": int(Xs.shape[0]),
     }
+
+
+def _parse_cluster_gmm_output_filename(filename: str) -> tuple[str | None, str | None, int]:
+    """
+    Nombres de salida del GMM:
+    - índices: ``{KEY}_gmm_k{K}.tif``
+    - multibanda: ``DD-MM-YYYY_GMM_K{K}.tif`` o ``…_GMM_K{K}_N.tif`` (único destino).
+    """
+    m = re.match(r"^(.+)_gmm_k(\d+)\.tif$", filename, re.I)
+    if m:
+        return ("index", m.group(1), int(m.group(2)))
+    m = re.match(r"^(\d{2}-\d{2}-\d{4})_GMM_K(\d+)(?:_\d+)?\.tif$", filename)
+    if m:
+        return ("multiband", m.group(1), int(m.group(2)))
+    return (None, None, 0)
+
+
+def load_cluster_gmm_results_from_storage(out_dir: Path) -> list[dict[str, Any]]:
+    """
+    Reconstruye la lista de resultados (previews base64) leyendo los GeoTIFF ya guardados
+    en ``cluster_gmm/`` (p. ej. tras reiniciar el servidor o en otra sesión).
+    """
+    out_dir = Path(out_dir)
+    if not out_dir.is_dir():
+        return []
+    results: list[dict[str, Any]] = []
+    for p in sorted(out_dir.glob("*.tif"), key=lambda x: x.name.lower()):
+        kind, key, k_used = _parse_cluster_gmm_output_filename(p.name)
+        if kind is None or not key:
+            continue
+        try:
+            with rasterio.open(p) as src:
+                if src.count < 1:
+                    continue
+                band = src.read(1)
+        except Exception as exc:
+            logger.warning("cluster_gmm omitiendo %s: %s", p.name, exc)
+            continue
+        labels_full = np.asarray(band)
+        if np.issubdtype(labels_full.dtype, np.floating):
+            labels_full = np.where(np.isfinite(labels_full), labels_full, -1.0).astype(np.int64)
+        else:
+            labels_full = labels_full.astype(np.int64)
+        step = max(1, max(labels_full.shape) // 400)
+        small = labels_full[::step, ::step].astype(np.int16)
+        if k_used <= 0:
+            valid = labels_full[labels_full >= 0]
+            k_used = max(1, len(np.unique(valid))) if valid.size else 1
+        labeled_fraction = float(np.mean(labels_full >= 0))
+        if kind == "index":
+            label = f"Índice {key}" if key in INDEX_KEYS else key
+            res_key = key
+            title = f"{key} — GMM K={k_used}"
+        else:
+            parts = key.split("-")
+            label = f"{parts[0]}/{parts[1]}/{parts[2]}" if len(parts) == 3 else key
+            res_key = f"recorte_{p.stem}"
+            title = f"{label} — GMM K={k_used}"
+        prev_b64 = plot_cluster_map_png(small, title)
+        results.append(
+            {
+                "key": res_key,
+                "kind": kind,
+                "label": label,
+                "output_path": str(p.resolve()),
+                "output_basename": p.name,
+                "preview_png_base64": prev_b64,
+                "k_used": k_used,
+                "labeled_fraction": labeled_fraction,
+            }
+        )
+
+    def _sort_key(r: dict[str, Any]) -> tuple:
+        rk = r["key"]
+        if r["kind"] == "index":
+            if rk in INDEX_KEYS:
+                return (0, INDEX_KEYS.index(rk), r["output_basename"])
+            return (0, 50, r["output_basename"])
+        return (1, 99, r["output_basename"])
+
+    results.sort(key=_sort_key)
+    return results
 
 
 def run_gmm_for_dataset(

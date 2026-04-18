@@ -35,7 +35,8 @@ export default function useMapLayers(mapRef) {
     return lid;
   }
 
-  function removeMapLayer(lid) {
+  function removeMapLayer(lid, options = {}) {
+    const skipPending = options.skipPending === true;
     const map = mapRef.current;
     if (map) {
       if (map.getLayer(lid)) map.removeLayer(lid);
@@ -43,7 +44,7 @@ export default function useMapLayers(mapRef) {
       if (map.getSource(lid)) map.removeSource(lid);
     }
     const removed = mapLayersRef.current.find((l) => l.id === lid);
-    if (removed && removed.serverId) {
+    if (removed && removed.serverId && !skipPending) {
       setPendingDeletes((prev) => [
         ...prev,
         { kind: removed.kind, serverId: removed.serverId },
@@ -67,6 +68,27 @@ export default function useMapLayers(mapRef) {
           map.setLayoutProperty(lid, "visibility", vis ? "visible" : "none");
         }
         return { ...l, visible: vis };
+      });
+      mapLayersRef.current = next;
+      return next;
+    });
+  }
+
+  /** Solo estado visible + lienzo; no borra la capa del proyecto ni del servidor. */
+  function setLayerVisibility(lid, visible) {
+    setMapLayers((prev) => {
+      const next = prev.map((l) => {
+        if (l.id !== lid) return l;
+        const map = mapRef.current;
+        if (map) {
+          if (map.getLayer(lid)) {
+            map.setLayoutProperty(lid, "visibility", visible ? "visible" : "none");
+          }
+          if (map.getLayer(`${lid}_outline`)) {
+            map.setLayoutProperty(`${lid}_outline`, "visibility", visible ? "visible" : "none");
+          }
+        }
+        return { ...l, visible };
       });
       mapLayersRef.current = next;
       return next;
@@ -97,6 +119,7 @@ export default function useMapLayers(mapRef) {
     addMapLayer,
     removeMapLayer,
     toggleLayerVisibility,
+    setLayerVisibility,
     clearAllMapLayers,
   };
 }

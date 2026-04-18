@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 export default function ProjectList({
   projects,
   projectId,
@@ -6,10 +8,28 @@ export default function ProjectList({
   loading,
   onSelectProject,
   onCreateProject,
+  onUpdateProject,
   onDeleteProject,
   onLogout,
   email,
 }) {
+  const [editingId, setEditingId] = useState(null);
+  const [editingName, setEditingName] = useState("");
+
+  async function saveRename() {
+    if (editingId == null) return;
+    const ok = await onUpdateProject(editingId, editingName);
+    if (ok) {
+      setEditingId(null);
+      setEditingName("");
+    }
+  }
+
+  function cancelRename() {
+    setEditingId(null);
+    setEditingName("");
+  }
+
   return (
     <>
       <div className="session-info">
@@ -28,23 +48,65 @@ export default function ProjectList({
             {projects.map((p) => (
               <li
                 key={p.id}
-                className={`projects-item${p.id === Number(projectId) ? " active" : ""}`}
-                onClick={() => onSelectProject(p.id)}
+                className={`projects-item${p.id === Number(projectId) ? " active" : ""}${editingId === p.id ? " editing" : ""}`}
+                onClick={() => {
+                  if (editingId === p.id) return;
+                  onSelectProject(p.id);
+                }}
               >
-                <span className="projects-item-name">{p.name}</span>
-                {p.id === Number(projectId) && (
-                  <span className="projects-item-check">&#10003;</span>
+                {editingId === p.id ? (
+                  <div className="projects-item-edit" onClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="text"
+                      className="projects-item-edit-input"
+                      value={editingName}
+                      onChange={(e) => setEditingName(e.target.value)}
+                      disabled={loading}
+                      autoFocus
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") saveRename();
+                        if (e.key === "Escape") cancelRename();
+                      }}
+                    />
+                    <div className="projects-item-edit-actions">
+                      <button type="button" className="projects-item-edit-save" onClick={saveRename} disabled={loading}>
+                        Guardar
+                      </button>
+                      <button type="button" className="projects-item-edit-cancel" onClick={cancelRename} disabled={loading}>
+                        Cancelar
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <span className="projects-item-name">{p.name}</span>
+                    {p.id === Number(projectId) && (
+                      <span className="projects-item-check">&#10003;</span>
+                    )}
+                    <button
+                      type="button"
+                      className="projects-item-rename"
+                      title="Renombrar proyecto"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setEditingId(p.id);
+                        setEditingName(p.name);
+                      }}
+                    >
+                      &#9998;
+                    </button>
+                    <button
+                      className="projects-item-delete"
+                      title="Eliminar proyecto"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDeleteProject(p.id);
+                      }}
+                    >
+                      &times;
+                    </button>
+                  </>
                 )}
-                <button
-                  className="projects-item-delete"
-                  title="Eliminar proyecto"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDeleteProject(p.id);
-                  }}
-                >
-                  &times;
-                </button>
               </li>
             ))}
           </ul>

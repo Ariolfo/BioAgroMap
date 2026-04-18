@@ -33,6 +33,18 @@ class ProjectCreate(BaseModel):
     name: str
 
 
+class ProjectUpdate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+
+    @field_validator("name")
+    @classmethod
+    def strip_name(cls, v: str) -> str:
+        s = v.strip()
+        if not s:
+            raise ValueError("Nombre vacío")
+        return s
+
+
 class PredictRequest(BaseModel):
     project_id: int
     model_type: str
@@ -75,6 +87,18 @@ class S2L2aRecorteRequest(BaseModel):
 
     project_id: int
     layer_id: int | None = None
+    product_names: list[str] | None = Field(
+        default=None,
+        description="Basenames de .zip o carpetas .SAFE L2A a procesar. Si se omite, se procesan todos los hallados en descargas.",
+    )
+    source_subpath: str | None = Field(
+        default=None,
+        description=(
+            "Ruta relativa (posix) bajo tenant_*/project_*/ donde buscar L2A. "
+            "Si se omite, se usa la carpeta de descargas Sentinel por defecto (downloads/<slug>). "
+            "Cadena vacía = raíz del proyecto."
+        ),
+    )
 
 
 class S2IndexStacksRequest(BaseModel):
@@ -86,6 +110,29 @@ class S2IndexStacksRequest(BaseModel):
         default=None,
         description="Solo estas capas raster (IDs del mapa). Omitir para autodetección en recortes/ y BD.",
     )
+    recorte_filenames: list[str] | None = Field(
+        default=None,
+        description="Basenames de GeoTIFF en recortes/ (p. ej. escena_S2_recorte.tif). Si se envía, "
+        "tiene prioridad sobre raster_layer_ids.",
+    )
+
+
+class VegetationTimeSeriesRequest(BaseModel):
+    """Series temporales por índice desde recortes L2A (6 bandas).
+
+    Por defecto devuelve **una serie por píxel** (muestreadas hasta ``max_pixel_series``) además de
+    agregados por escena en ``points``.
+    """
+
+    project_id: int
+    raster_layer_ids: list[int] = Field(..., min_length=1)
+    max_pixel_series: int = Field(
+        default=4000,
+        ge=1,
+        le=50_000,
+        description="Máximo de píxeles para los que se devuelven series completas (todas las fechas).",
+    )
+    random_seed: int = Field(default=42, description="Semilla para el muestreo aleatorio de píxeles.")
 
 
 class ClusterElbowRequest(BaseModel):

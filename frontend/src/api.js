@@ -147,6 +147,13 @@ function resolvedRequestUrl(error) {
 
 export function formatApiErrorDetail(error) {
   if (!error) return "Error desconocido";
+  if (
+    !error.response &&
+    (error.code === "ERR_NETWORK" || String(error.message || "").includes("Network Error"))
+  ) {
+    const tried = resolvedRequestUrl(error);
+    return `No se pudo conectar con el API (${tried || "URL no deducible"}). Comprueba que el backend esté en marcha. Si abres la app por IP o desde otro equipo, define VITE_API_URL con la URL del servidor (p. ej. http://IP:8000) o asegura el proxy de Vite hacia /api.`;
+  }
   const d = error.response?.data?.detail;
   if (d == null) return error.message || "Error de red o servidor";
   if (typeof d === "string") {

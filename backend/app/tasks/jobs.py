@@ -236,6 +236,8 @@ def s2_l2a_recortes_pipeline(
     project_name: str,
     layer_id: int | None,
     db_url: str,
+    product_names: list[str] | None = None,
+    source_subpath: str | None = None,
 ) -> dict:
     """
     Por cada ZIP L2A o carpeta .SAFE: un GeoTIFF de 6 bandas (B02,B03,B04,B05@10m,B08,B11@10m),
@@ -271,20 +273,39 @@ def s2_l2a_recortes_pipeline(
         if not wkt:
             return {"ok": False, "error": "no_wkt", "message": "No hay polígono en el proyecto."}
 
-        downloads = project_downloads_dir(tenant_id, project_id, project_name)
+        from app.core.config import settings as app_settings
+
+        if source_subpath is None:
+            downloads = project_downloads_dir(tenant_id, project_id, project_name)
+        else:
+            pr = (
+                Path(app_settings.storage_path).resolve() / f"tenant_{tenant_id}" / f"project_{project_id}"
+            ).resolve()
+            rel = (source_subpath or "").strip().replace("\\", "/")
+            parts = [x for x in rel.split("/") if x and x != "."]
+            cur = pr
+            for part in parts:
+                if part == "..":
+                    return {"ok": False, "error": "bad_path", "message": "Ruta inválida"}
+                cur = (cur / part).resolve()
+            try:
+                cur.relative_to(pr)
+            except ValueError:
+                return {"ok": False, "error": "bad_path", "message": "Ruta fuera del proyecto"}
+            downloads = cur
         if not downloads.is_dir():
             return {
                 "ok": False,
                 "error": "no_downloads",
-                "message": f"No existe carpeta de descargas: {downloads}",
+                "message": f"No existe la carpeta de productos L2A: {downloads}",
             }
 
         candidates: list[tuple[str, Path]] = []
         try:
             for p in sorted(downloads.iterdir()):
-                if p.is_file() and p.suffix.lower() == ".zip" and "MSIL2A" in p.name.upper():
+                if p.is_file() and p.suffix.lower() == ".zip":
                     candidates.append(("zip", p))
-                elif p.is_dir() and p.name.upper().endswith(".SAFE") and "MSIL2A" in p.name.upper():
+                elif p.is_dir() and p.name.upper().endswith(".SAFE"):
                     candidates.append(("safe", p))
         except OSError as exc:
             return {"ok": False, "error": "list_failed", "message": str(exc)}
@@ -293,8 +314,20 @@ def s2_l2a_recortes_pipeline(
             return {
                 "ok": False,
                 "error": "no_l2a",
-                "message": "No hay productos L2A (.zip MSIL2A o carpeta .SAFE) en la carpeta de descargas.",
+                "message": "No hay productos Sentinel-2 reconocibles (.zip o carpeta .SAFE) en la carpeta de descargas.",
             }
+
+        if product_names:
+            allowed = {Path(str(x).strip()).name for x in product_names if str(x).strip()}
+            if not allowed:
+                return {"ok": False, "error": "no_selection", "message": "Lista de productos vacía."}
+            candidates = [(k, p) for k, p in candidates if p.name in allowed]
+            if not candidates:
+                return {
+                    "ok": False,
+                    "error": "no_match",
+                    "message": "Ningún nombre coincide con productos L2A en la carpeta de descargas.",
+                }
 
         rasters_dir = _tenant_storage(tenant_id, project_id, "rasters")
         recortes_root = _tenant_storage(tenant_id, project_id, "recortes")
@@ -437,6 +470,7 @@ def s2_index_stacks_pipeline(
     indices: list[str],
     db_url: str,
     raster_layer_ids: list[int] | None = None,
+    recorte_filenames: list[str] | None = None,
 ) -> dict:
     """
     Por cada índice seleccionado: stack multibanda (una banda por escena) desde recortes L2A 6 bandas.
@@ -447,9 +481,10 @@ def s2_index_stacks_pipeline(
 
     from app.api.v1.helpers import _tenant_storage
     from app.models.models import RasterLayer
-    from app.services.raster_geo import bounds_wgs84_from_path
     from app.services.s2_vegetation_indices import (
         discover_recorte_scenes,
+        discover_recorte_scenes_by_filenames,
+        normalize_index_minmax_per_scene,
         normalize_requested_indices,
         process_scene_index,
         read_six_bands_aligned,
@@ -464,13 +499,16 @@ def s2_index_stacks_pipeline(
     errors: list[dict[str, str]] = []
     try:
         recortes_root = _tenant_storage(tenant_id, project_id, "recortes")
-        scenes = discover_recorte_scenes(
-            db,
-            project_id,
-            tenant_id,
-            recortes_root,
-            raster_layer_ids=raster_layer_ids,
-        )
+        if recorte_filenames:
+            scenes = discover_recorte_scenes_by_filenames(recortes_root, recorte_filenames)
+        else:
+            scenes = discover_recorte_scenes(
+                db,
+                project_id,
+                tenant_id,
+                recortes_root,
+                raster_layer_ids=raster_layer_ids,
+            )
         if not scenes:
             return {
                 "ok": False,
@@ -487,8 +525,6 @@ def s2_index_stacks_pipeline(
         indices_root = _tenant_storage(tenant_id, project_id, "indices")
 
         for folder_name, calc_name in pairs:
-            dir_out = indices_root / folder_name
-            dir_out.mkdir(parents=True, exist_ok=True)
             bands_stack: list = []
             dates_used: list[str] = []
 
@@ -497,6 +533,7 @@ def s2_index_stacks_pipeline(
             for sort_key, tif_path in scenes:
                 try:
                     arr = process_scene_index(tif_path, calc_name)
+                    arr = normalize_index_minmax_per_scene(arr)
                     bands_stack.append(arr)
                     dates_used.append(sort_key)
                 except Exception as exc:
@@ -506,6 +543,9 @@ def s2_index_stacks_pipeline(
             if not bands_stack:
                 logger.error("Índice %s: sin bandas válidas", folder_name)
                 continue
+
+            dir_out = indices_root / folder_name
+            dir_out.mkdir(parents=True, exist_ok=True)
 
             _, base_prof = read_six_bands_aligned(scenes[0][1])
             base_prof.update(count=1, dtype="float32")
@@ -517,6 +557,7 @@ def s2_index_stacks_pipeline(
                 outputs[folder_name] = str(out_path)
                 logger.info("Stack %s guardado: %s (%s bandas)", folder_name, out_path, len(bands_stack))
 
+                # No registrar stacks como capas del mapa; limpiar filas legacy (versiones anteriores sí creaban capa).
                 for old in (
                     db.query(RasterLayer)
                     .filter(
@@ -535,41 +576,6 @@ def s2_index_stacks_pipeline(
                                     pass
                         db.delete(old)
                 db.commit()
-
-                cog_path = out_path.with_name(out_path.stem + "_cog.tif")
-                meta_layer = {
-                    "s2_index_stack": True,
-                    "vegetation_index_key": folder_name,
-                    "index_display_name": folder_name,
-                    "index_stack_band_count": len(bands_stack),
-                    "index_band_dates": list(dates_used),
-                    "status": "processing",
-                    "cog_ready": False,
-                    "preview_rgb_bands": [1, 1, 1],
-                    # Vista previa / mapa: paleta continua (rojo ≈ bajo, verde ≈ alto). Alternativas: Spectral, turbo, jet
-                    "index_preview_cmap": "RdYlGn",
-                    "bands_display_note": (
-                        f"Índice {folder_name}: banda i = fecha i; vista con paleta RdYlGn (rojo→verde)"
-                    ),
-                    "composite_kind": "index_stack",
-                    "s2_sort_key": dates_used[-1] if dates_used else "",
-                }
-                bds = bounds_wgs84_from_path(out_path)
-                if bds:
-                    meta_layer["bounds_wgs84"] = list(bds)
-
-                r_index = RasterLayer(
-                    project_id=project_id,
-                    tenant_id=tenant_id,
-                    name=f"{folder_name} ({len(bands_stack)} fechas · {dmin}–{dmax})",
-                    file_path=str(out_path),
-                    cog_path=str(cog_path),
-                    raster_metadata=meta_layer,
-                )
-                db.add(r_index)
-                db.commit()
-                db.refresh(r_index)
-                apply_raster_cog(str(out_path), str(cog_path), r_index.id)
             except Exception as exc:
                 logger.exception("Fallo al escribir stack %s", folder_name)
                 errors.append({"scene": "", "index": folder_name, "error": str(exc)})

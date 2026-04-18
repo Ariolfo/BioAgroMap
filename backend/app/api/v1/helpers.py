@@ -23,9 +23,14 @@ def _tenant_storage(tenant_id: int, project_id: int, kind: str) -> Path:
     return base
 
 
+def project_downloads_slug(project_name: str) -> str:
+    """Subcarpeta bajo downloads/ para Sentinel-2; debe coincidir en todo el backend."""
+    return project_name.replace(" ", "_").lower()
+
+
 def project_downloads_dir(tenant_id: int, project_id: int, project_name: str) -> Path:
     """Carpeta de descargas Sentinel-2 (mismo slug que en preprocess/download)."""
-    slug = project_name.replace(" ", "_").lower()
+    slug = project_downloads_slug(project_name)
     return _tenant_storage(tenant_id, project_id, "downloads") / slug
 
 

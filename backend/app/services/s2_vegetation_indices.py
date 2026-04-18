@@ -64,6 +64,49 @@ def _safe_div(num: np.ndarray, den: np.ndarray) -> np.ndarray:
     return out
 
 
+def spatial_mean_std_iqr_filtered(
+    values: np.ndarray,
+    *,
+    iqr_factor: float = 1.5,
+) -> tuple[float | None, float | None, int, int, int]:
+    """
+    Media y desviación estándar espacial tras excluir valores atípicos (Tukey: fuera de
+    [Q1 - k·IQR, Q3 + k·IQR]). Si el filtro deja muy pocos píxeles, se usan todos los válidos.
+
+    Retorna: mean, std (ddof=1), n_raw, n_used, n_removed
+    """
+    arr = np.asarray(values, dtype=np.float64).ravel()
+    arr = arr[np.isfinite(arr)]
+    n_raw = int(arr.size)
+    if n_raw == 0:
+        return None, None, 0, 0, 0
+    if n_raw < 4:
+        m = float(np.mean(arr))
+        s = float(np.std(arr, ddof=1)) if n_raw > 1 else 0.0
+        return m, s, n_raw, n_raw, 0
+    q1, q3 = np.percentile(arr, [25.0, 75.0])
+    iqr = float(q3 - q1)
+    if iqr <= 0:
+        m = float(np.mean(arr))
+        s = float(np.std(arr, ddof=1)) if n_raw > 1 else 0.0
+        return m, s, n_raw, n_raw, 0
+    lo = q1 - iqr_factor * iqr
+    hi = q3 + iqr_factor * iqr
+    mask = (arr >= lo) & (arr <= hi)
+    trimmed = arr[mask]
+    min_keep = max(1, int(max(50.0, 0.05 * n_raw)))
+    if trimmed.size < min_keep or trimmed.size == 0:
+        trimmed = arr
+        n_removed = 0
+        n_used = n_raw
+    else:
+        n_used = int(trimmed.size)
+        n_removed = n_raw - n_used
+    m = float(np.mean(trimmed))
+    s = float(np.std(trimmed, ddof=1)) if trimmed.size > 1 else 0.0
+    return m, s, n_raw, n_used, n_removed
+
+
 def _evi_offset_den(b4: np.ndarray) -> float:
     """EVI: denominador +L; L=10000 típico en reflectancia Sentinel DN, L=1 si ya está ~0–1."""
     m = np.nanmedian(np.abs(b4[np.isfinite(b4)])) if np.any(np.isfinite(b4)) else 0.0
@@ -167,6 +210,68 @@ def process_scene_index(
 ) -> np.ndarray:
     bands, _ = read_six_bands_aligned(tif_path)
     return compute_index_arrays(bands, index_name)
+
+
+def build_normalized_index_volumes_for_paths(
+    scene_paths: list[Path],
+    index_list: tuple[str, ...],
+) -> tuple[dict[str, np.ndarray], dict]:
+    """
+    Por cada escena: lee 6 bandas, calcula cada índice y normaliza min-max por escena.
+    Apila en un volumen (T,H,W) por índice; remuestrea a la rejilla de la **primera** escena si hace falta.
+
+    Retorna ``(stacked_by_index, ref_profile)`` con ``stacked_by_index[ix].shape == (T, H, W)``.
+    """
+    if not scene_paths:
+        raise ValueError("scene_paths vacío")
+    vols: dict[str, list[np.ndarray]] = {ix: [] for ix in index_list}
+    ref_profile: dict | None = None
+
+    for t, path in enumerate(scene_paths):
+        bands, profile = read_six_bands_aligned(path)
+        if t == 0:
+            ref_profile = profile
+        assert ref_profile is not None
+        rh = int(ref_profile["height"])
+        rw = int(ref_profile["width"])
+        for ix in index_list:
+            raw = compute_index_arrays(bands, ix)
+            norm = normalize_index_minmax_per_scene(raw)
+            if t > 0 and norm.shape != (rh, rw):
+                norm = _resample_to_match(
+                    norm,
+                    profile["transform"],
+                    profile["crs"],
+                    rh,
+                    rw,
+                    ref_profile["transform"],
+                    ref_profile["crs"],
+                )
+            vols[ix].append(norm.astype(np.float32))
+
+    stacked = {ix: np.stack(vols[ix], axis=0) for ix in index_list}
+    return stacked, ref_profile
+
+
+def normalize_index_minmax_per_scene(arr: np.ndarray, eps: float = 1e-9) -> np.ndarray:
+    """
+    Normalización min-max **por escena** (cada banda del stack se escala de forma independiente):
+
+        index_norm = (index - index_min) / (index_max - index_min + eps)
+
+    Solo se usan píxeles finitos para estimar min/max; el resto permanece NaN.
+    """
+    a = np.asarray(arr, dtype=np.float64)
+    out = np.full(a.shape, np.nan, dtype=np.float64)
+    mask = np.isfinite(a)
+    if not np.any(mask):
+        return out.astype(np.float32)
+    vals = a[mask]
+    vmin = float(np.min(vals))
+    vmax = float(np.max(vals))
+    denom = (vmax - vmin) + eps
+    out[mask] = (a[mask] - vmin) / denom
+    return out.astype(np.float32)
 
 
 def write_multiband_stack(
@@ -280,7 +385,10 @@ def discover_recorte_scenes(
     Escenas candidatas (fecha ISO sort_key, ruta TIF ≥6 bandas tipo L2A recorte). Sin duplicar rutas.
     Orden cronológico por sort_key.
 
-    Si ``raster_layer_ids`` está definido, solo esas capas (p. ej. las cargadas en el mapa).
+    Si ``raster_layer_ids`` está definido, solo esas capas en BD; si el ``file_path`` no existe
+    en disco, se intenta ``recortes_root / nombre_archivo``. Si tras eso no hay ninguna escena
+    válida, se escanean ``*.tif`` en ``recortes_root`` (útil si API y worker no comparten la misma
+    ruta absoluta).
     """
     from app.models.models import RasterLayer
 
@@ -300,7 +408,21 @@ def discover_recorte_scenes(
         if "_cog" in fp.name.lower():
             continue
         if not fp.is_file():
-            continue
+            alt = (recortes_root / fp.name) if recortes_root.is_dir() else None
+            if alt and alt.is_file():
+                fp = alt
+                logger.info(
+                    "discover_recorte_scenes: capa %s resuelta en recortes/ por nombre (ruta BD distinta al worker): %s",
+                    r.id,
+                    fp.name,
+                )
+            else:
+                logger.warning(
+                    "discover_recorte_scenes: capa %s omitida (archivo inexistente en BD ni en recortes/): %s",
+                    r.id,
+                    r.file_path,
+                )
+                continue
         meta = r.raster_metadata or {}
         if not is_six_band_s2_stack_file(fp, meta):
             logger.warning("Capa raster %s omitida (no es stack L2A 6+ bandas): %s", r.id, fp.name)
@@ -310,7 +432,16 @@ def discover_recorte_scenes(
             continue
         by_path[fp.resolve()] = (sk, fp)
 
-    if not raster_layer_ids and recortes_root.is_dir():
+    # Sin filtro de IDs: BD + *.tif sueltos en recortes/. Con filtro pero 0 escenas válidas:
+    # escanear recortes/ (p. ej. rutas absolutas de la API no montadas igual en el worker Celery).
+    scan_disk = recortes_root.is_dir() and (not raster_layer_ids or len(by_path) == 0)
+    if scan_disk and raster_layer_ids and len(by_path) == 0:
+        logger.warning(
+            "discover_recorte_scenes: ninguna capa válida con raster_layer_ids=%s; usando *.tif en %s",
+            raster_layer_ids,
+            recortes_root,
+        )
+    if scan_disk:
         for p in sorted(recortes_root.glob("*.tif")):
             if "_cog" in p.name.lower():
                 continue
@@ -330,3 +461,52 @@ def discover_recorte_scenes(
             by_path[rp] = (sk, p)
 
     return sorted(by_path.values(), key=lambda t: (t[0], str(t[1])))
+
+
+def discover_recorte_scenes_by_filenames(
+    recortes_root: Path,
+    filenames: list[str],
+) -> list[tuple[str, Path]]:
+    """
+    Escenas por ruta relativa posix bajo ``recortes_root`` (p. ej. ``escena.tif`` o ``sub/a.tif``).
+    Sin depender de capas en BD; requiere ``*.tif`` (no COG), ≥6 bandas.
+    """
+    root = recortes_root.resolve()
+    if not root.is_dir():
+        return []
+    out: list[tuple[str, Path]] = []
+    seen: set[str] = set()
+    for raw in filenames:
+        s = str(raw).strip().replace("\\", "/")
+        if not s or ".." in s.split("/"):
+            logger.warning("discover_recorte_scenes_by_filenames: ruta omitida: %s", raw)
+            continue
+        rel = Path(s)
+        if rel.is_absolute():
+            continue
+        p = (root / rel).resolve()
+        if not p.is_file() or not p.is_relative_to(root):
+            logger.warning("discover_recorte_scenes_by_filenames: no existe o fuera de recortes/: %s", s)
+            continue
+        if "_cog" in p.name.lower():
+            continue
+        key = p.as_posix()
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            with rasterio.open(p) as src:
+                if int(src.count) < 6:
+                    logger.warning("discover_recorte_scenes_by_filenames: <6 bandas: %s", s)
+                    continue
+        except Exception:
+            logger.warning("discover_recorte_scenes_by_filenames: no se pudo abrir: %s", s)
+            continue
+        sk = sort_key_from_path_or_meta(p, None)
+        if not sk:
+            try:
+                sk = datetime.fromtimestamp(p.stat().st_mtime).date().isoformat()
+            except OSError:
+                sk = "1900-01-01"
+        out.append((sk, p))
+    return sorted(out, key=lambda t: (t[0], str(t[1])))

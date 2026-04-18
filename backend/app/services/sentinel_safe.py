@@ -243,3 +243,34 @@ def safe_extract_zip(zip_path: Path, dest_dir: Path) -> None:
     dest_dir.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(zip_path, "r") as zf:
         zf.extractall(dest_dir)
+
+
+def looks_like_sentinel2_product_zip_filename(name: str) -> bool:
+    """
+    Heurística para .zip de producto Sentinel-2 (L1C/L2A) en carpeta de descargas.
+    Más amplio que solo MSIL2A en el nombre (p. ej. nombres acortados o L1C).
+    """
+    if not str(name).lower().endswith(".zip"):
+        return False
+    u = str(name).upper()
+    return (
+        "MSIL2A" in u
+        or "MSIL1C" in u
+        or "S2A_MSIL" in u
+        or "S2B_MSIL" in u
+        or "S2C_MSIL" in u
+    )
+
+
+def looks_like_sentinel2_safe_dirname(name: str) -> bool:
+    """Carpeta de producto .SAFE típica de Sentinel-2."""
+    u = str(name).upper()
+    if not u.endswith(".SAFE"):
+        return False
+    return (
+        "MSIL2A" in u
+        or "MSIL1C" in u
+        or "S2A_MSIL" in u
+        or "S2B_MSIL" in u
+        or "S2C_MSIL" in u
+    )

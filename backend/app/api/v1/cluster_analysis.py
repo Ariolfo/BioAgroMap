@@ -67,6 +67,29 @@ def list_cluster_datasets(
     return {"datasets": datasets}
 
 
+@router.get("/cluster-analysis/gmm-results/{project_id}")
+def get_cluster_gmm_results(
+    project_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """
+    Lista resultados GMM ya guardados en ``cluster_gmm/`` (misma forma que POST /gmm),
+    regenerando las miniaturas PNG desde los GeoTIFF en disco.
+    """
+    _project_or_404(db, project_id, tenant_id)
+    out_dir = _tenant_storage(tenant_id, project_id, "cluster_gmm")
+    results = sc.load_cluster_gmm_results_from_storage(out_dir)
+    return {
+        "project_id": project_id,
+        "output_dir": str(Path(out_dir).resolve()),
+        "cluster_gmm_absolute_path": str(Path(out_dir).resolve()),
+        "pipeline_build": CLUSTER_PIPELINE_BUILD,
+        "results": results,
+        "reload_from_disk": True,
+    }
+
+
 @router.post("/cluster-analysis/elbow")
 def cluster_elbow(
     payload: ClusterElbowRequest,

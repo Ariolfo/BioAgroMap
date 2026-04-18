@@ -3,13 +3,9 @@ import { formatRecorteDisplayName, rasterSortKeyFromMetadata } from "../utils/ge
 
 export default function LayersPanel({
   mapLayers,
-  projectId,
-  dirty,
-  loading,
   onToggleVisibility,
   onZoomToLayer,
-  onRemoveLayer,
-  onSave,
+  onHideLayer,
 }) {
   const orderedLayers = useMemo(() => {
     const vectors = mapLayers.filter((l) => l.kind === "vector");
@@ -62,9 +58,10 @@ export default function LayersPanel({
                 &#8982;
               </button>
               <button
+                type="button"
                 className="layers-remove"
-                title="Eliminar capa"
-                onClick={() => onRemoveLayer(l.id)}
+                title="Ocultar en el mapa (la capa sigue en el proyecto)"
+                onClick={() => onHideLayer(l.id)}
               >
                 &times;
               </button>
@@ -73,17 +70,6 @@ export default function LayersPanel({
           })
         )}
       </ul>
-      {projectId && (
-        <div className="layers-save">
-          <button
-            className="btn-save"
-            onClick={onSave}
-            disabled={loading || !dirty}
-          >
-            {dirty ? "Guardar cambios" : "Guardado"}
-          </button>
-        </div>
-      )}
     </div>
   );
 }

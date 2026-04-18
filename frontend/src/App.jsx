@@ -41,11 +41,13 @@ export default function App() {
   const [rasterFile, setRasterFile] = useState(null);
   const [downloadSource, setDownloadSource] = useState("sentinel-1");
   const [selectedIndices, setSelectedIndices] = useState([]);
-  const [stackMode, setStackMode] = useState("visualizar");
+  const [stackMode, setStackMode] = useState("visual-rgb");
   const [targetRasterId, setTargetRasterId] = useState("");
   const [s2Download, setS2Download] = useState(null);
   const [recorteTaskId, setRecorteTaskId] = useState("");
   const [indexStacksTaskId, setIndexStacksTaskId] = useState("");
+  /** Incrementa para abrir la galería «Visual índices» al terminar la estimación. */
+  const [visualIndexGalleryKick, setVisualIndexGalleryKick] = useState(0);
   const [clusterElbowLoading, setClusterElbowLoading] = useState(false);
   const [clusterGmmLoading, setClusterGmmLoading] = useState(false);
   const [clusterElbowResults, setClusterElbowResults] = useState(null);
@@ -184,6 +186,11 @@ export default function App() {
               ? `Stacks de índices generados (${result.scene_count ?? "?"} escenas). ${parts.join(" | ")}${errTxt}`
               : `${result.message || "Sin archivos de salida; comprueba recortes L2A."}${errTxt}`
           );
+          if (Object.keys(outs).length > 0) {
+            setStackMode("visual-index");
+            setVisualIndexGalleryKick((k) => k + 1);
+            await selectProject(projectId, token);
+          }
         } else if (r.data.ready && r.data.state === "FAILURE") {
           setIndexStacksTaskId("");
           setMessage(`Error en stacks de índices: ${r.data.error || "fallo"}`);
@@ -203,13 +210,11 @@ export default function App() {
   const {
     mapLayers,
     mapLayersRef,
-    pendingDeletes,
     setPendingDeletes,
-    dirty,
     setDirty,
     addMapLayer,
-    removeMapLayer,
     toggleLayerVisibility,
+    setLayerVisibility,
     clearAllMapLayers,
   } = useMapLayers(mapRef);
 
@@ -331,7 +336,6 @@ export default function App() {
           continue;
         }
         if (isLegacyS2ZipBandRaster(m)) continue;
-        if (m.s2_index_stack) continue;
         const rb = m.bounds_wgs84;
         const rbbox = bboxFromBoundsWgs84(rb);
         const title =
@@ -352,7 +356,6 @@ export default function App() {
         const m = r.metadata || {};
         if (m.source === "sentinel-2" && m.type === "download") return false;
         if (isLegacyS2ZipBandRaster(m)) return false;
-        if (m.s2_index_stack) return false;
         return true;
       });
       const totalLayers = layersRes.data.length + visibleRasters.length;
@@ -371,24 +374,23 @@ export default function App() {
     }
   }
 
-  async function saveProject() {
-    if (!token || !projectId) return;
+  async function updateProjectName(id, name) {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      setMessage("Error: el nombre del proyecto no puede estar vacío.");
+      return false;
+    }
     setLoading(true);
-    setMessage("Guardando proyecto...");
+    setMessage("");
     try {
       setAuthToken(token);
-      for (const del of pendingDeletes) {
-        const url = del.kind === "raster"
-          ? `/raster/${projectId}/${del.serverId}`
-          : `/layers/${projectId}/${del.serverId}`;
-        await api.delete(url);
-      }
-      setPendingDeletes([]);
-      setDirty(false);
-      setMessage("Proyecto guardado correctamente.");
+      await api.patch(`/projects/${id}`, { name: trimmed });
+      await fetchProjects(token);
+      setMessage(`Proyecto renombrado a "${trimmed}".`);
+      return true;
     } catch (error) {
-      const detail = error?.response?.data?.detail || error.message || "Error al guardar";
-      setMessage(`Error: ${detail}`);
+      setMessage(`Error: ${formatApiErrorDetail(error)}`);
+      return false;
     } finally {
       setLoading(false);
     }
@@ -673,79 +675,72 @@ export default function App() {
     }
   }
 
-  async function fetchS2Inventory() {
+  async function runS2L2aRecortes(layerId, productNames, sourceSubpath) {
     if (!token || !projectId) {
       setMessage("Error: inicia sesion y selecciona un proyecto.");
-      return;
+      return false;
+    }
+    const names = Array.isArray(productNames)
+      ? [...new Set(productNames.map((s) => String(s).trim()).filter(Boolean))]
+      : [];
+    if (names.length === 0) {
+      setMessage("Selecciona al menos un producto L2A (.zip o carpeta .SAFE) en la lista.");
+      return false;
     }
     setLoading(true);
     setMessage("");
     try {
       setAuthToken(token);
-      const r = await api.get(`/raster/project-downloads-inventory/${projectId}`);
-      const z = r.data.zip_l2a?.length ?? 0;
-      const s = r.data.safe_folders?.length ?? 0;
-      const o = r.data.other_top_level?.length
-        ? ` Otros: ${r.data.other_top_level.join(", ")}.`
-        : "";
-      setMessage(
-        r.data.exists
-          ? `Inventario (${r.data.downloads_dir}): ${z} ZIP L2A, ${s} carpetas .SAFE.${o}`
-          : `Aun no existe la carpeta de descargas (${r.data.downloads_dir}). Descarga Sentinel-2 desde Cargar primero.`
-      );
-    } catch (error) {
-      const detail = error?.response?.data?.detail || error.message || "Error";
-      setMessage(`Error: ${detail}`);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function runS2L2aRecortes(layerId) {
-    if (!token || !projectId) {
-      setMessage("Error: inicia sesion y selecciona un proyecto.");
-      return;
-    }
-    setLoading(true);
-    setMessage("");
-    try {
-      setAuthToken(token);
-      const body = { project_id: Number(projectId) };
+      const body = {
+        project_id: Number(projectId),
+        product_names: names,
+      };
+      if (sourceSubpath !== undefined) {
+        body.source_subpath = sourceSubpath;
+      }
       if (layerId != null && layerId !== "") {
         const n = Number(layerId);
         if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
           setMessage(
             "Error: el polígono elegido no tiene ID de capa válido en el servidor. Vuelve a cargar el proyecto o sube de nuevo el lote."
           );
-          return;
+          return false;
         }
         body.layer_id = n;
       }
       const res = await api.post("/preprocess/s2-l2a-recortes", body);
       setRecorteTaskId(res.data.task_id);
       setMessage(`Pipeline L2A en curso (tarea ${res.data.task_id}). Puede tardar si hay varios productos.`);
+      return true;
     } catch (error) {
       setMessage(`Error: ${formatApiErrorDetail(error)}`);
+      return false;
     } finally {
       setLoading(false);
     }
   }
 
-  async function runS2IndexStacks(explicitRasterIds) {
+  async function runS2IndexStacks(explicitRasterIds, opts = {}) {
+    const recorteFilenames = Array.isArray(opts?.recorteFilenames)
+      ? [...new Set(opts.recorteFilenames.map((s) => String(s).trim()).filter(Boolean))]
+      : [];
     if (!token || !projectId) {
       setMessage("Error: inicia sesión y selecciona un proyecto.");
       return;
     }
-    if (!selectedIndices.length) {
-      setMessage("Selecciona al menos un índice (o TODOS) en el desplegable.");
+    const indicesPayload = selectedIndices.length > 0 ? selectedIndices : [];
+    if (!indicesPayload.length) {
+      setMessage(
+        "Selecciona al menos un índice en la ventana «Seleccionar escenas e estimar índices»."
+      );
       return;
     }
     const ids = Array.isArray(explicitRasterIds)
       ? [...new Set(explicitRasterIds.map((x) => Number(x)).filter((n) => Number.isFinite(n) && n >= 1))]
       : [];
-    if (ids.length === 0) {
+    if (ids.length === 0 && recorteFilenames.length === 0) {
       setMessage(
-        "Abre «Seleccionar escenas e estimar índices», marca las escenas con stack de 6 bandas y pulsa Estimar índice."
+        "Abre «Seleccionar escenas e estimar índices», marca escenas (archivos en recortes/) y pulsa Estimar índice."
       );
       return;
     }
@@ -755,42 +750,18 @@ export default function App() {
       setAuthToken(token);
       const body = {
         project_id: Number(projectId),
-        indices: selectedIndices,
-        raster_layer_ids: ids,
+        indices: indicesPayload,
       };
+      if (recorteFilenames.length > 0) {
+        body.recorte_filenames = recorteFilenames;
+      } else {
+        body.raster_layer_ids = ids;
+      }
       const res = await api.post("/preprocess/s2-index-stacks", body);
       setIndexStacksTaskId(res.data.task_id);
       setMessage(`Stacks de índices en cola (tarea ${res.data.task_id}).`);
     } catch (error) {
       setMessage(`Error: ${formatApiErrorDetail(error)}`);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function preprocessStack() {
-    if (!token || !projectId) {
-      setMessage("Error: define proyecto.");
-      return;
-    }
-    if (stackMode === "visual-rgb" || stackMode === "visual-index") {
-      setMessage(
-        "Abre la galería con el botón en Procesos (opción Visual RGB o Visual índices)."
-      );
-      return;
-    }
-    setLoading(true);
-    setMessage("");
-    try {
-      setAuthToken(token);
-      const res = await api.post("/preprocess/stack", {
-        project_id: Number(projectId),
-        mode: stackMode,
-      });
-      setMessage(`Stack ${res.data.mode} ejecutado correctamente.`);
-    } catch (error) {
-      const detail = error?.response?.data?.detail || error.message || "Error en stack";
-      setMessage(`Error: ${detail}`);
     } finally {
       setLoading(false);
     }
@@ -851,6 +822,20 @@ export default function App() {
     }
   }
 
+  /** Resultados GMM ya guardados en ``cluster_gmm/`` (p. ej. otra sesión o tras reiniciar). */
+  async function loadPersistedClusterGmm() {
+    if (!token || !projectId) return null;
+    setAuthToken(token);
+    const res = await api.get(`/cluster-analysis/gmm-results/${projectId}`);
+    const data = res.data;
+    if (data?.results?.length) {
+      setClusterGmmResults(data);
+    } else {
+      setClusterGmmResults(null);
+    }
+    return data;
+  }
+
   return (
     <div className="layout">
       <Sidebar
@@ -866,7 +851,6 @@ export default function App() {
         projectName={projectName}
         setProjectName={setProjectName}
         mapLayers={mapLayers}
-        dirty={dirty}
         targetRasterId={targetRasterId}
         setTargetRasterId={setTargetRasterId}
         loteFile={loteFile}
@@ -884,27 +868,27 @@ export default function App() {
         onLogout={logoutSession}
         onSelectProject={(id) => selectProject(id, token)}
         onCreateProject={createProject}
+        onUpdateProject={updateProjectName}
         onDeleteProject={deleteProject}
         onToggleVisibility={toggleLayerVisibility}
         onZoomToLayer={zoomToLayer}
-        onRemoveLayer={removeMapLayer}
-        onSave={saveProject}
+        onHideLayer={(lid) => setLayerVisibility(lid, false)}
         onUploadLote={uploadLote}
         onUploadRaster={uploadRaster}
         onRunAI={runAI}
         onDownload={preprocessDownload}
         recortePipelineBusy={!!recorteTaskId}
         indexStacksBusy={!!indexStacksTaskId}
-        onFetchS2Inventory={fetchS2Inventory}
+        visualIndexGalleryKick={visualIndexGalleryKick}
         onS2L2aRecortes={runS2L2aRecortes}
         onS2IndexStacks={runS2IndexStacks}
-        onStack={preprocessStack}
         clusterElbowLoading={clusterElbowLoading}
         clusterGmmLoading={clusterGmmLoading}
         clusterElbowResults={clusterElbowResults}
         clusterGmmResults={clusterGmmResults}
         onClusterElbow={runClusterElbow}
         onClusterGmm={runClusterGmm}
+        onLoadPersistedClusterGmm={loadPersistedClusterGmm}
         s2Download={s2Download}
       />
       <MapView
