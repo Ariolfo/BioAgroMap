@@ -30,6 +30,7 @@ MVP funcional para portal geoespacial agrícola con arquitectura SaaS multi-tena
    - `cp .env.example .env`
 2. Levantar stack:
    - `docker compose up -d`
+   ## docker compose ps
 3. Generar raster de ejemplo:
    - `docker compose exec backend python -c "import numpy as np,rasterio; from rasterio.transform import from_origin; import pathlib; p=pathlib.Path('/data/sample/agri_sample.tif'); p.parent.mkdir(parents=True,exist_ok=True); d=(np.random.rand(256,256)*255).astype('uint8'); t=from_origin(-74.2,4.8,0.0005,0.0005); with rasterio.open(p,'w',driver='GTiff',height=256,width=256,count=1,dtype=d.dtype,crs='EPSG:4326',transform=t) as dst: dst.write(d,1); print(p)"`
 4. Servicios:

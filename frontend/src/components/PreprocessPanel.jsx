@@ -227,9 +227,10 @@ export default function PreprocessPanel({
   const [l2aJobSourceSubpath, setL2aJobSourceSubpath] = useState(undefined);
   const [clusterPeekHint, setClusterPeekHint] = useState("");
   const [loadingClusterPersisted, setLoadingClusterPersisted] = useState(false);
-  const lastVisualIndexKick = useRef(0);
-  const lastPreproGalleryKick = useRef(0);
-  const lastPreproClusterVizKick = useRef(0);
+  /** Inicializar con el kick actual para no reabrir galería/modales al remontar la pestaña S2/PS. */
+  const lastVisualIndexKick = useRef(visualIndexGalleryKick);
+  const lastPreproGalleryKick = useRef(preproGalleryKick);
+  const lastPreproClusterVizKick = useRef(preproClusterVizKick);
   const openClusterGmmResultsOrHintRef = useRef(async () => {});
   const vectorLayers = mapLayers.filter((l) => l.kind === "vector");
   const hasVectors = vectorLayers.length > 0;

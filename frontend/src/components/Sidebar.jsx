@@ -6,6 +6,15 @@ import UploadPanel from "./UploadPanel";
 import PreprocessPanel from "./PreprocessPanel";
 import Sentinel1Panel from "./Sentinel1Panel";
 
+function isS1StackMode(mode) {
+  return (
+    mode === "visual-s1-vv" ||
+    mode === "visual-s1-vh" ||
+    mode === "visual-s1-index" ||
+    mode === "visual-s1-sar-indices"
+  );
+}
+
 export default function Sidebar({
   activeTab,
   setActiveTab,
@@ -155,6 +164,7 @@ export default function Sidebar({
             setActiveTab("prepro");
             setPanelOpen(true);
             setLayersPanelOpen(false);
+            if (isS1StackMode(stackMode)) setStackMode("visual-rgb");
           }}
         >
           S2
@@ -168,6 +178,7 @@ export default function Sidebar({
             setActiveTab("ps");
             setPanelOpen(true);
             setLayersPanelOpen(false);
+            if (isS1StackMode(stackMode)) setStackMode("visual-rgb");
           }}
         >
           PS
