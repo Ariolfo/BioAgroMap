@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import math
 import re
-import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
+from defusedxml import ElementTree as ET
 import rasterio
 from rasterio.warp import transform_bounds
 

@@ -140,3 +140,6 @@ pytest -q
 - Manifest K8s inicial en `infrastructure/k8s/backend-deployment.yaml`
 - Escalado horizontal del backend mediante replicas
 - Recomendada separacion en imagenes versionadas por servicio
+
+
+#cloudflared tunnel --url http://localhost:5173

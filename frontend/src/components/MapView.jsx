@@ -1,31 +1,49 @@
 import { useEffect, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { API_URL } from "../api";
-import { buildBaseStyle, rasterSortKeyFromMetadata } from "../utils/geo";
+import { buildBaseStyle } from "../utils/geo";
 
-/** Capas visibles arriba; ocultas abajo, para que al apagar la superior se vea la inferior. */
-function reorderRasterStack(map, rasterList) {
-  if (!map || !rasterList.length) return;
-  const sorted = [...rasterList].sort((a, b) => {
-    const ka = rasterSortKeyFromMetadata(a.metadata);
-    const kb = rasterSortKeyFromMetadata(b.metadata);
-    const c = ka.localeCompare(kb);
-    if (c !== 0) return c;
-    return (a.serverId || 0) - (b.serverId || 0);
-  });
-  const hidden = sorted.filter((l) => !l.visible);
-  const visible = sorted.filter((l) => l.visible);
-  [...hidden, ...visible].forEach((l) => {
-    if (!map.getLayer(l.id)) return;
-    try {
-      map.moveLayer(l.id);
-    } catch (_) {}
-  });
-  try {
-    map.triggerRepaint();
-  } catch (_) {}
+function rectangleFeatureCollection(c1, c2) {
+  const w = Math.min(c1[0], c2[0]);
+  const e = Math.max(c1[0], c2[0]);
+  const s = Math.min(c1[1], c2[1]);
+  const n = Math.max(c1[1], c2[1]);
+  const ring = [
+    [w, s],
+    [e, s],
+    [e, n],
+    [w, n],
+    [w, s],
+  ];
+  return {
+    type: "FeatureCollection",
+    features: [
+      {
+        type: "Feature",
+        properties: {},
+        geometry: { type: "Polygon", coordinates: [ring] },
+      },
+    ],
+  };
 }
+
+function polygonFromRing(pts) {
+  if (pts.length < 3) return null;
+  const ring = [...pts, pts[0]];
+  return {
+    type: "FeatureCollection",
+    features: [
+      {
+        type: "Feature",
+        properties: {},
+        geometry: { type: "Polygon", coordinates: [ring] },
+      },
+    ],
+  };
+}
+
+const TMP_SRC = "_study_draw_tmp_src";
+const TMP_LINE = "_study_draw_tmp_line";
 
 export default function MapView({
   mapRef,
@@ -35,11 +53,48 @@ export default function MapView({
   token,
   baseStyle,
   setBaseStyle,
+  studyDraw = null,
 }) {
   const containerRef = useRef(null);
   const [showBaseOptions, setShowBaseOptions] = useState(false);
   const rasterBlobUrlsRef = useRef(new Map());
   const rasterFetchInFlightRef = useRef(new Set());
+  const polygonPtsRef = useRef([]);
+  const rectCornerRef = useRef(null);
+  const drawCompleteRef = useRef(null);
+  const drawTooFewRef = useRef(null);
+
+  useEffect(() => {
+    drawCompleteRef.current = studyDraw?.onComplete;
+    drawTooFewRef.current = studyDraw?.onPolygonTooFew;
+  }, [studyDraw?.onComplete, studyDraw?.onPolygonTooFew]);
+
+  function removeStudyTemp(map) {
+    try {
+      if (map.getLayer(TMP_LINE)) map.removeLayer(TMP_LINE);
+    } catch (_) {}
+    try {
+      if (map.getSource(TMP_SRC)) map.removeSource(TMP_SRC);
+    } catch (_) {}
+  }
+
+  function paintTempLine(map, pts) {
+    removeStudyTemp(map);
+    if (pts.length < 2) return;
+    const geo = {
+      type: "Feature",
+      properties: {},
+      geometry: { type: "LineString", coordinates: pts },
+    };
+    if (!map.isStyleLoaded()) return;
+    map.addSource(TMP_SRC, { type: "geojson", data: geo });
+    map.addLayer({
+      id: TMP_LINE,
+      type: "line",
+      source: TMP_SRC,
+      paint: { "line-color": "#e11d48", "line-width": 2 },
+    });
+  }
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
@@ -107,103 +162,109 @@ export default function MapView({
     const map = mapRef.current;
     if (!map || !projectId || !token) return;
 
-    const syncRasters = () => {
+    const removeRastersFromMap = () => {
       if (!map.isStyleLoaded()) return;
-      const layers = mapLayersRef.current.filter(
-        (l) => l.kind === "raster" && l.serverId && l.bbox
-      );
-      const wanted = new Set(layers.map((l) => l.id));
-
-      for (const [id, url] of [...rasterBlobUrlsRef.current.entries()]) {
-        if (!wanted.has(id)) {
+      const rasterIds = mapLayersRef.current
+        .filter((l) => l.kind === "raster")
+        .map((l) => l.id);
+      for (const id of rasterIds) {
+        const url = rasterBlobUrlsRef.current.get(id);
+        if (url) {
           URL.revokeObjectURL(url);
           rasterBlobUrlsRef.current.delete(id);
-          try {
-            if (map.getLayer(id)) map.removeLayer(id);
-            if (map.getSource(id)) map.removeSource(id);
-          } catch (_) {}
         }
+        rasterFetchInFlightRef.current.delete(id);
+        try {
+          if (map.getLayer(id)) map.removeLayer(id);
+          if (map.getSource(id)) map.removeSource(id);
+        } catch (_) {}
       }
-
-      const base = API_URL.replace(/\/$/, "");
-      layers.forEach((l) => {
-        if (map.getSource(l.id)) {
-          if (map.getLayer(l.id)) {
-            map.setLayoutProperty(l.id, "visibility", l.visible ? "visible" : "none");
-          }
-          return;
-        }
-        if (rasterFetchInFlightRef.current.has(l.id)) return;
-
-        const meta = l.metadata || {};
-        const palQ =
-          meta.s2_index_stack === true ? "&index_palette=1" : "";
-        const previewUrl = `${base}/raster/${projectId}/${l.serverId}/preview?v=${l.serverId}${palQ}`;
-        rasterFetchInFlightRef.current.add(l.id);
-        fetch(previewUrl, {
-          headers: { Authorization: `Bearer ${token}` },
-          cache: "no-store",
-        })
-          .then((r) => {
-            if (!r.ok) throw new Error(String(r.status));
-            return r.blob();
-          })
-          .then((blob) => {
-            if (!map.isStyleLoaded()) return;
-            if (!mapLayersRef.current.some((x) => x.id === l.id)) return;
-            const objectUrl = URL.createObjectURL(blob);
-            rasterBlobUrlsRef.current.set(l.id, objectUrl);
-            const bbox = l.bbox;
-            const coordinates = [
-              [bbox[0][0], bbox[1][1]],
-              [bbox[1][0], bbox[1][1]],
-              [bbox[1][0], bbox[0][1]],
-              [bbox[0][0], bbox[0][1]],
-            ];
-            if (map.getSource(l.id)) return;
-            const cur = mapLayersRef.current.find((x) => x.id === l.id);
-            const visNow = cur ? cur.visible : l.visible;
-            map.addSource(l.id, { type: "image", url: objectUrl, coordinates });
-            map.addLayer({
-              id: l.id,
-              type: "raster",
-              source: l.id,
-              paint: { "raster-opacity": 0.92, "raster-fade-duration": 0 },
-              layout: { visibility: visNow ? "visible" : "none" },
-            });
-            reorderRasterStack(
-              map,
-              mapLayersRef.current.filter(
-                (x) => x.kind === "raster" && x.serverId && x.bbox
-              )
-            );
-          })
-          .catch(() => {
-            /* 404 mientras Celery genera el GeoTIFF; el intervalo reintenta */
-          })
-          .finally(() => {
-            rasterFetchInFlightRef.current.delete(l.id);
-          });
-      });
-
-      reorderRasterStack(map, layers);
     };
 
     const run = () => {
-      if (map.isStyleLoaded()) syncRasters();
-      else map.once("load", syncRasters);
+      if (map.isStyleLoaded()) removeRastersFromMap();
+      else map.once("load", removeRastersFromMap);
     };
     run();
-
-    const iv = setInterval(() => {
-      const pending = mapLayersRef.current.filter(
-        (l) => l.kind === "raster" && l.serverId && l.bbox && !map.getSource(l.id)
-      );
-      if (pending.length && map.isStyleLoaded()) syncRasters();
-    }, 2500);
-
-    return () => clearInterval(iv);
   }, [mapLayers, projectId, token, baseStyle]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !studyDraw?.active) {
+      polygonPtsRef.current = [];
+      rectCornerRef.current = null;
+      if (map && map.isStyleLoaded()) removeStudyTemp(map);
+      if (map) {
+        try {
+          map.doubleClickZoom.enable();
+        } catch (_) {}
+      }
+      return undefined;
+    }
+
+    polygonPtsRef.current = [];
+    rectCornerRef.current = null;
+    const onStyle = () => {
+      try {
+        map.doubleClickZoom.disable();
+      } catch (_) {}
+    };
+    if (map.isStyleLoaded()) onStyle();
+    else map.once("load", onStyle);
+
+    const onClick = (e) => {
+      const lng = e.lngLat.lng;
+      const lat = e.lngLat.lat;
+      if (studyDraw.mode === "polygon") {
+        polygonPtsRef.current = [...polygonPtsRef.current, [lng, lat]];
+        paintTempLine(map, polygonPtsRef.current);
+      } else if (studyDraw.mode === "rectangle") {
+        if (!rectCornerRef.current) {
+          rectCornerRef.current = [lng, lat];
+        } else {
+          const gj = rectangleFeatureCollection(rectCornerRef.current, [lng, lat]);
+          removeStudyTemp(map);
+          rectCornerRef.current = null;
+          polygonPtsRef.current = [];
+          try {
+            map.doubleClickZoom.enable();
+          } catch (_) {}
+          drawCompleteRef.current?.(gj);
+        }
+      }
+    };
+
+    map.on("click", onClick);
+    return () => {
+      map.off("click", onClick);
+      removeStudyTemp(map);
+      polygonPtsRef.current = [];
+      rectCornerRef.current = null;
+      try {
+        map.doubleClickZoom.enable();
+      } catch (_) {}
+    };
+  }, [studyDraw?.active, studyDraw?.mode]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !studyDraw?.active || studyDraw.mode !== "polygon") return;
+    const key = studyDraw.finalizePolygonKey ?? 0;
+    if (key <= 0) return;
+    const pts = polygonPtsRef.current;
+    if (pts.length < 3) {
+      drawTooFewRef.current?.();
+      return;
+    }
+    const gj = polygonFromRing(pts);
+    if (!gj) return;
+    removeStudyTemp(map);
+    polygonPtsRef.current = [];
+    try {
+      map.doubleClickZoom.enable();
+    } catch (_) {}
+    drawCompleteRef.current?.(gj);
+  }, [studyDraw?.finalizePolygonKey, studyDraw?.active, studyDraw?.mode]);
 
   return (
     <main className="map-container">

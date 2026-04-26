@@ -8,9 +8,9 @@ const backendProxy =
 export default defineConfig({
   plugins: [react()],
   server: {
-    host: true,
+    host: '0.0.0.0',
     port: 5173,
-    // Volúmen ./frontend:/app: asegura HMR cuando el host no propaga inotify al contenedor.
+    allowedHosts: ['suggestion-divided-mechanisms-fleet.trycloudflare.com'],// Volúmen ./frontend:/app: asegura HMR cuando el host no propaga inotify al contenedor.,
     watch: {
       usePolling: true,
       interval: 800,

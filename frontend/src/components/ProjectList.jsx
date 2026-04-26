@@ -12,6 +12,10 @@ export default function ProjectList({
   onDeleteProject,
   onLogout,
   email,
+  readOnly = false,
+  title = "Mis Proyectos",
+  /** Si ya se muestra sesión arriba (p. ej. en pestaña Ingresar admin), evitar duplicar Cerrar sesión. */
+  hideSessionHeader = false,
 }) {
   const [editingId, setEditingId] = useState(null);
   const [editingName, setEditingName] = useState("");
@@ -32,15 +36,17 @@ export default function ProjectList({
 
   return (
     <>
-      <div className="session-info">
-        <span>{email}</span>
-        <button onClick={onLogout} disabled={loading} className="btn-link">
-          Cerrar sesion
-        </button>
-      </div>
+      {!hideSessionHeader ? (
+        <div className="session-info">
+          <span>{email}</span>
+          <button onClick={onLogout} disabled={loading} className="btn-link">
+            Cerrar sesion
+          </button>
+        </div>
+      ) : null}
 
       <div className="projects-section">
-        <div className="projects-header">Mis Proyectos</div>
+        <div className="projects-header">{title}</div>
         {projects.length === 0 ? (
           <div className="projects-empty">Sin proyectos. Crea uno nuevo.</div>
         ) : (
@@ -83,28 +89,32 @@ export default function ProjectList({
                     {p.id === Number(projectId) && (
                       <span className="projects-item-check">&#10003;</span>
                     )}
-                    <button
-                      type="button"
-                      className="projects-item-rename"
-                      title="Renombrar proyecto"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setEditingId(p.id);
-                        setEditingName(p.name);
-                      }}
-                    >
-                      &#9998;
-                    </button>
-                    <button
-                      className="projects-item-delete"
-                      title="Eliminar proyecto"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onDeleteProject(p.id);
-                      }}
-                    >
-                      &times;
-                    </button>
+                    {!readOnly ? (
+                      <>
+                        <button
+                          type="button"
+                          className="projects-item-rename"
+                          title="Renombrar proyecto"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setEditingId(p.id);
+                            setEditingName(p.name);
+                          }}
+                        >
+                          &#9998;
+                        </button>
+                        <button
+                          className="projects-item-delete"
+                          title="Eliminar proyecto"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onDeleteProject(p.id);
+                          }}
+                        >
+                          &times;
+                        </button>
+                      </>
+                    ) : null}
                   </>
                 )}
               </li>
@@ -113,18 +123,20 @@ export default function ProjectList({
         )}
       </div>
 
-      <div className="create-project-row">
-        <input
-          type="text"
-          value={projectName}
-          onChange={(e) => setProjectName(e.target.value)}
-          placeholder="Nombre nuevo proyecto"
-          disabled={loading}
-        />
-        <button onClick={onCreateProject} disabled={loading || !projectName.trim()}>
-          + Crear
-        </button>
-      </div>
+      {!readOnly ? (
+        <div className="create-project-row">
+          <input
+            type="text"
+            value={projectName}
+            onChange={(e) => setProjectName(e.target.value)}
+            placeholder="Nombre nuevo proyecto"
+            disabled={loading}
+          />
+          <button onClick={onCreateProject} disabled={loading || !projectName.trim()}>
+            + Crear
+          </button>
+        </div>
+      ) : null}
     </>
   );
 }

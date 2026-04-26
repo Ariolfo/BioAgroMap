@@ -23,14 +23,99 @@ class TokenResponse(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
+    role: str
+    temporary_password: str | None = None
 
 
 class RefreshRequest(BaseModel):
     refresh_token: str
 
 
+class UserMeResponse(BaseModel):
+    id: int
+    email: EmailStr
+    tenant_id: int
+    role: str
+
+
+class UserSummaryResponse(BaseModel):
+    id: int
+    email: EmailStr
+    full_name: str = ""
+    tenant_id: int
+    role: str
+    is_active: bool = True
+    created_at: str | None = None
+
+
+class AdminCreateUserRequest(BaseModel):
+    full_name: str = Field(..., min_length=1, max_length=255)
+    email: EmailStr
+    role: str = "cliente"
+
+    @field_validator("full_name")
+    @classmethod
+    def strip_full_name(cls, v: str) -> str:
+        s = v.strip()
+        if not s:
+            raise ValueError("El nombre no puede estar vacío")
+        return s
+
+    @field_validator("role")
+    @classmethod
+    def normalize_create_role(cls, v: str) -> str:
+        role = v.strip().lower()
+        if role not in {"admin", "cliente"}:
+            raise ValueError("role debe ser admin o cliente")
+        return role
+
+
+class AdminCreateUserResponse(BaseModel):
+    id: int
+    email: EmailStr
+    full_name: str
+    role: str
+    created_at: str
+    temporary_password: str
+
+
+class UserAuditLogEntry(BaseModel):
+    id: int
+    created_at: str
+    actor_user_id: int | None
+    target_user_id: int | None
+    action: str
+    details: dict = Field(default_factory=dict)
+
+
+class UpdateUserActiveRequest(BaseModel):
+    is_active: bool
+
+
+class UpdateUserRoleRequest(BaseModel):
+    role: str
+
+    @field_validator("role")
+    @classmethod
+    def normalize_role(cls, v: str) -> str:
+        role = v.strip().lower()
+        if role not in {"admin", "cliente"}:
+            raise ValueError("role debe ser admin o cliente")
+        return role
+
+
 class ProjectCreate(BaseModel):
     name: str
+
+
+class ProjectSummary(BaseModel):
+    id: int
+    name: str
+    owner_user_id: int | None = None
+    owner_email: str | None = None
+    status: str = "pendiente"
+    created_at: str | None = None
+    published_at: str | None = None
 
 
 class ProjectUpdate(BaseModel):
@@ -49,6 +134,15 @@ class PredictRequest(BaseModel):
     project_id: int
     model_type: str
     raster_layer_id: int
+
+    @field_validator("model_type")
+    @classmethod
+    def validate_model_type(cls, v: str) -> str:
+        allowed = {"segmentation", "classification", "timeseries", "mock"}
+        val = v.strip().lower()
+        if val not in allowed:
+            raise ValueError(f"model_type inválido. Permitidos: {', '.join(sorted(allowed))}")
+        return val
 
 
 class DownloadRequest(BaseModel):
@@ -291,3 +385,142 @@ class PsSpatiotemporalClusterRequest(BaseModel):
 
     n_clusters: int = Field(default=4, ge=2, le=32)
     random_state: int = 42
+
+
+# --- Registro simplificado (correo + OTP) ---
+
+
+class CheckEmailRequest(BaseModel):
+    email: EmailStr
+
+
+class CheckEmailResponse(BaseModel):
+    exists: bool
+    role: str | None = None
+    is_admin: bool = False
+
+
+class RequestOtpRequest(BaseModel):
+    email: EmailStr
+
+
+class RequestOtpResponse(BaseModel):
+    message: str
+    debug_otp: str | None = None
+
+
+class VerifyOtpRegisterRequest(BaseModel):
+    email: EmailStr
+    code: str = Field(..., min_length=4, max_length=12)
+
+    @field_validator("code")
+    @classmethod
+    def strip_code(cls, v: str) -> str:
+        return v.strip()
+
+
+# --- Solicitudes estudio AgroGeoFísico ---
+
+
+class StudyOrderCreate(BaseModel):
+    geometry: dict = Field(..., description="GeoJSON Feature, FeatureCollection o Geometry")
+    applicant_name: str = Field(..., min_length=1, max_length=255)
+    applicant_phone: str = Field(..., min_length=5, max_length=50)
+    study_date_start: str = Field(..., description="YYYY-MM-DD")
+    study_date_end: str = Field(..., description="YYYY-MM-DD")
+    company: str | None = None
+    crop: str | None = None
+    age_years: int | None = Field(default=None, ge=0, le=150)
+    has_weather_data: bool = False
+    has_soil_data: bool = False
+    extra_notes: str | None = None
+
+    @field_validator("applicant_name", "applicant_phone", "company", "crop", "extra_notes", mode="before")
+    @classmethod
+    def strip_opt_str(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, str):
+            s = v.strip()
+            return s or None
+        return v
+
+
+class StudyOrderSummary(BaseModel):
+    id: int
+    user_email: str
+    project_id: int | None = None
+    project_name: str | None = None
+    created_at: str
+    crop: str | None
+    status: str
+
+
+class StudyOrderDetail(BaseModel):
+    id: int
+    user_id: int
+    user_email: str
+    project_id: int | None = None
+    project_name: str | None = None
+    applicant_name: str
+    applicant_phone: str
+    company: str | None
+    crop: str | None
+    age_years: int | None
+    study_date_start: str
+    study_date_end: str
+    has_weather_data: bool
+    has_soil_data: bool
+    extra_notes: str | None
+    geometry: dict
+    status: str
+    assigned_admin_id: int | None = None
+    processing_started_at: str | None = None
+    processing_completed_at: str | None = None
+    created_at: str
+
+
+class StudyOrderStatusPatch(BaseModel):
+    status: str
+
+    @field_validator("status")
+    @classmethod
+    def allowed_status(cls, v: str) -> str:
+        s = v.strip().lower().replace("_", " ")
+        if s.replace(" ", "") == "enproceso" or s == "en proceso":
+            return "en proceso"
+        if s not in {"pendiente", "en proceso", "completado"}:
+            raise ValueError("Estado debe ser: pendiente, en proceso o completado")
+        return s
+
+
+class ProjectStatusPatch(BaseModel):
+    status: str
+
+    @field_validator("status")
+    @classmethod
+    def validate_project_status(cls, v: str) -> str:
+        s = v.strip().lower().replace("_", " ")
+        if s.replace(" ", "") == "enproceso":
+            s = "en proceso"
+        allowed = {"pendiente", "en proceso", "procesado", "publicado"}
+        if s not in allowed:
+            raise ValueError("Estado de proyecto inválido")
+        return s
+
+
+class ProcessingLogCreate(BaseModel):
+    stage: str
+    status: str = "ok"
+    details: dict = Field(default_factory=dict)
+
+
+class ProcessingLogEntry(BaseModel):
+    id: int
+    project_id: int
+    order_id: int | None = None
+    actor_admin_id: int | None = None
+    stage: str
+    status: str
+    details: dict = Field(default_factory=dict)
+    created_at: str

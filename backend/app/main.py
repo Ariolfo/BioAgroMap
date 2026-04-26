@@ -9,6 +9,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.api.v1.routes import router as v1_router
 from app.core.config import get_max_upload_mb, settings
+from app.core.security import decode_token
 logging.basicConfig(level=logging.INFO)
 audit_logger = logging.getLogger("audit")
 logger = logging.getLogger(__name__)
@@ -39,6 +40,32 @@ def _log_upload_limit() -> None:
     logger.info("Almacenamiento: STORAGE_PATH=%r", settings.storage_path)
 
 _redis_client = None
+
+
+def _bearer_token_from_request(request: Request) -> str | None:
+    auth = request.headers.get("Authorization", "").strip()
+    if not auth.lower().startswith("bearer "):
+        return None
+    token = auth[7:].strip()
+    return token or None
+
+
+def _is_cliente_allowed_request(request: Request) -> bool:
+    path = request.url.path
+    method = request.method.upper()
+    if not path.startswith(settings.api_v1_prefix):
+        return True
+    if path.startswith(f"{settings.api_v1_prefix}/study-orders") and method == "POST":
+        return True
+    if path.startswith(f"{settings.api_v1_prefix}/auth"):
+        return True
+    if method == "GET" and (
+        path.startswith(f"{settings.api_v1_prefix}/projects")
+        or path.startswith(f"{settings.api_v1_prefix}/layers")
+        or path.startswith(f"{settings.api_v1_prefix}/raster")
+    ):
+        return True
+    return False
 
 
 def _get_redis():
@@ -74,6 +101,16 @@ async def audit_and_rate_limit(request: Request, call_next):
                     },
                 )
         except Exception:
+            pass
+    token = _bearer_token_from_request(request)
+    if token:
+        try:
+            claims = decode_token(token)
+            role = str(claims.get("role", "")).strip().lower()
+            if role == "cliente" and not _is_cliente_allowed_request(request):
+                return JSONResponse(status_code=403, content={"detail": "Forbidden for cliente role"})
+        except Exception:
+            # La autenticación formal sigue en los endpoints/dependencies.
             pass
     response = await call_next(request)
     audit_logger.info(

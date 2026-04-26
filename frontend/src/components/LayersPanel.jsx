@@ -1,5 +1,4 @@
 import { useMemo } from "react";
-import { formatRecorteDisplayName, rasterSortKeyFromMetadata } from "../utils/geo";
 
 export default function LayersPanel({
   mapLayers,
@@ -9,23 +8,15 @@ export default function LayersPanel({
   onOpenDashboard,
   dashboardDisabled = false,
 }) {
-  const orderedLayers = useMemo(() => {
-    const vectors = mapLayers.filter((l) => l.kind === "vector");
-    const rasters = mapLayers.filter((l) => l.kind === "raster");
-    rasters.sort((a, b) => {
-      const ka = rasterSortKeyFromMetadata(a.metadata);
-      const kb = rasterSortKeyFromMetadata(b.metadata);
-      const c = ka.localeCompare(kb);
-      if (c !== 0) return c;
-      return (a.serverId || 0) - (b.serverId || 0);
-    });
-    return [...vectors, ...rasters];
-  }, [mapLayers]);
+  const vectorLayers = useMemo(
+    () => mapLayers.filter((l) => l.kind === "vector"),
+    [mapLayers]
+  );
 
   return (
     <div className="layers-panel">
       <div className="layers-panel-header">
-        <span>Capas ({mapLayers.length})</span>
+        <span>Capas ({vectorLayers.length})</span>
         <button
           type="button"
           className="layers-dashboard-btn"
@@ -37,16 +28,11 @@ export default function LayersPanel({
         </button>
       </div>
       <ul className="layers-list">
-        {mapLayers.length === 0 ? (
+        {vectorLayers.length === 0 ? (
           <li className="layers-empty">Sin capas cargadas</li>
         ) : (
-          orderedLayers.map((l) => {
-            const label =
-              l.displayName ||
-              (l.kind === "raster"
-                ? formatRecorteDisplayName(l.metadata, l.name)
-                : null) ||
-              l.name;
+          vectorLayers.map((l) => {
+            const label = l.displayName || l.name;
             return (
             <li key={l.id} className="layers-item">
               <input

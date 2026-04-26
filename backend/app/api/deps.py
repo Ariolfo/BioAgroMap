@@ -12,10 +12,25 @@ from app.models.models import User
 bearer = HTTPBearer(auto_error=False)
 
 
-def issue_tokens(user: User):
-    access = create_token(str(user.id), user.tenant_id, timedelta(minutes=settings.access_token_expire_minutes), "access")
-    refresh = create_token(str(user.id), user.tenant_id, timedelta(minutes=settings.refresh_token_expire_minutes), "refresh")
-    return {"access_token": access, "refresh_token": refresh, "token_type": "bearer"}
+def issue_tokens(user: User, extra: dict | None = None):
+    access = create_token(
+        str(user.id),
+        user.tenant_id,
+        user.role,
+        timedelta(minutes=settings.access_token_expire_minutes),
+        "access",
+    )
+    refresh = create_token(
+        str(user.id),
+        user.tenant_id,
+        user.role,
+        timedelta(minutes=settings.refresh_token_expire_minutes),
+        "refresh",
+    )
+    out = {"access_token": access, "refresh_token": refresh, "token_type": "bearer", "role": user.role}
+    if extra:
+        out.update(extra)
+    return out
 
 
 def get_current_user(
@@ -27,11 +42,42 @@ def get_current_user(
     payload = decode_token(credentials.credentials)
     if payload.get("type") != "access":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
-    user = db.query(User).filter(User.id == int(payload["sub"])).first()
+    sub = payload.get("sub")
+    token_tenant_id = payload.get("tenant_id")
+    token_role = payload.get("role")
+    if sub is None or token_tenant_id is None or token_role is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Malformed token")
+    try:
+        token_user_id = int(sub)
+        token_tenant_id = int(token_tenant_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Malformed token")
+
+    # Server-side session validation: never trust user identifiers from client.
+    user = db.query(User).filter(User.id == token_user_id).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid user")
+    if user.id != token_user_id or user.tenant_id != token_tenant_id or user.role != str(token_role):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session/user mismatch")
+    if not getattr(user, "is_active", True):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Cuenta inactiva")
     return user
 
 
 def tenant_from_jwt(user: User = Depends(get_current_user)) -> int:
     return user.tenant_id
+
+
+def assert_user_matches_session(user_id: int, user: User = Depends(get_current_user)) -> User:
+    """
+    Enforce `user.id == session.user.id` on endpoints that receive `user_id`.
+    """
+    if user.id != int(user_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden user scope")
+    return user
+
+
+def require_admin(user: User = Depends(get_current_user)) -> User:
+    if str(user.role).lower() != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required")
+    return user

@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import io
 import math
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
 import rasterio
 from affine import Affine
+from defusedxml import ElementTree as ET
 from rasterio.enums import Resampling
 from rasterio.transform import from_gcps
 from rasterio.warp import transform_bounds

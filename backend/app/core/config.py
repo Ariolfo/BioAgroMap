@@ -2,7 +2,7 @@ import logging
 import os
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -55,9 +55,9 @@ def _settings_model_config() -> SettingsConfigDict:
 class Settings(BaseSettings):
     app_name: str = "BioAgroMap API"
     api_v1_prefix: str = "/api/v1"
-    secret_key: str = "change-me-in-production"
+    secret_key: str = ""
     algorithm: str = "HS256"
-    access_token_expire_minutes: int = 120
+    access_token_expire_minutes: int = 15
     refresh_token_expire_minutes: int = 60 * 24 * 7
     database_url: str = "postgresql+psycopg2://postgres:postgres@localhost:5432/bioagromap"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000"
@@ -74,6 +74,16 @@ class Settings(BaseSettings):
         description="CDSE (Copernicus Data Space); misma cuenta para descarga Sentinel-2 y Sentinel-1.",
     )
     copernicus_password: str = Field(default="", description="Contraseña CDSE (Sentinel-2 / Sentinel-1).")
+    order_notify_email: str = Field(
+        default="ariolfo.camacho@saber.uis.edu.co",
+        description="Destino de notificaciones de nuevas solicitudes de estudio AgroGeoFísico.",
+    )
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    smtp_use_tls: bool = True
     snap_gpt_path: str = Field(
         default="",
         description=(
@@ -83,6 +93,23 @@ class Settings(BaseSettings):
         ),
     )
     model_config = _settings_model_config()
+
+    @field_validator("secret_key")
+    @classmethod
+    def validate_secret_key(cls, v: str) -> str:
+        if not v or v.strip() in {"change-me-in-production", "super-secret-dev-key"}:
+            raise ValueError("SECRET_KEY must be provided via environment and cannot use insecure defaults")
+        return v.strip()
+
+    @field_validator("access_token_expire_minutes")
+    @classmethod
+    def validate_access_expiry(cls, v: int) -> int:
+        # Security baseline: access JWT must not exceed 15 minutes.
+        if int(v) > 15:
+            raise ValueError("ACCESS_TOKEN_EXPIRE_MINUTES must be <= 15")
+        if int(v) < 1:
+            raise ValueError("ACCESS_TOKEN_EXPIRE_MINUTES must be >= 1")
+        return int(v)
 
 
 settings = Settings()
@@ -99,8 +126,3 @@ def get_max_upload_mb() -> int:
             pass
     return max(1, int(settings.max_upload_mb))
 
-
-if settings.secret_key in {"change-me-in-production", "super-secret-dev-key"}:
-    if os.getenv("ENV", "development") != "development":
-        raise RuntimeError("SECRET_KEY must be changed for non-development environments")
-    logger.warning("Using default SECRET_KEY — not safe for production")

@@ -1,15 +1,18 @@
 import shutil
 from pathlib import Path
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, tenant_from_jwt
+from app.api.deps import get_current_user, require_admin, tenant_from_jwt
+from app.core.order_email import send_study_order_notification
 from app.core.config import settings
 from app.db.session import get_db
-from app.models.models import AIResult, Layer, Project, RasterLayer, User
+from app.models.models import AIResult, Layer, Project, ProjectProcessingLog, RasterLayer, StudyOrder, User
 from app.api.v1.helpers import project_downloads_slug
-from app.schemas.schemas import ProjectCreate, ProjectUpdate
+from app.schemas.schemas import ProcessingLogCreate, ProcessingLogEntry, ProjectCreate, ProjectStatusPatch, ProjectSummary, ProjectUpdate
 
 router = APIRouter()
 
@@ -56,19 +59,36 @@ def _rewrite_raster_paths_after_downloads_move(
 def create_project(
     payload: ProjectCreate,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ):
-    project = Project(name=payload.name, tenant_id=user.tenant_id)
+    project = Project(name=payload.name, tenant_id=user.tenant_id, owner_user_id=user.id, status="pendiente")
     db.add(project)
     db.commit()
     db.refresh(project)
-    return {"id": project.id, "name": project.name}
+    return {"id": project.id, "name": project.name, "status": project.status, "owner_user_id": project.owner_user_id}
 
 
 @router.get("/projects")
-def list_projects(db: Session = Depends(get_db), tenant_id: int = Depends(tenant_from_jwt)):
-    projects = db.query(Project).filter(Project.tenant_id == tenant_id).all()
-    return [{"id": p.id, "name": p.name} for p in projects]
+def list_projects(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    q = db.query(Project).filter(Project.tenant_id == user.tenant_id)
+    if str(user.role).lower() == "cliente":
+        q = q.filter(Project.owner_user_id == user.id, Project.status == "publicado")
+    projects = q.order_by(Project.id.desc()).all()
+    out = []
+    for p in projects:
+        owner = db.query(User).filter(User.id == p.owner_user_id).first() if p.owner_user_id else None
+        out.append(
+            {
+                "id": p.id,
+                "name": p.name,
+                "owner_user_id": p.owner_user_id,
+                "owner_email": owner.email if owner else None,
+                "status": p.status,
+                "created_at": p.created_at.isoformat() if p.created_at else None,
+                "published_at": p.published_at.isoformat() if p.published_at else None,
+            }
+        )
+    return out
 
 
 @router.patch("/projects/{project_id}")
@@ -77,6 +97,7 @@ def update_project(
     payload: ProjectUpdate,
     db: Session = Depends(get_db),
     tenant_id: int = Depends(tenant_from_jwt),
+    _admin: User = Depends(require_admin),
 ):
     project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
     if not project:
@@ -108,8 +129,108 @@ def update_project(
     return {"id": project.id, "name": project.name}
 
 
+@router.patch("/projects/{project_id}/status", response_model=ProjectSummary)
+def patch_project_status(
+    project_id: int,
+    payload: ProjectStatusPatch,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == admin.tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    prev = project.status
+    now = datetime.utcnow()
+    project.status = payload.status
+    if payload.status == "en proceso":
+        project.processing_started_at = now
+        project.processed_by_admin_id = admin.id
+    if payload.status == "procesado":
+        project.processing_completed_at = now
+        project.processed_by_admin_id = admin.id
+    if payload.status == "publicado":
+        project.published_at = now
+        project.approved_by_admin_id = admin.id
+        owner = db.query(User).filter(User.id == project.owner_user_id).first()
+        if owner:
+            send_study_order_notification(
+                order_id=project.id,
+                user_email=owner.email,
+                lines=[
+                    f"Proyecto {project.name} publicado",
+                    "Su polígono fue procesado y los resultados están disponibles en su dashboard.",
+                    f"Proyecto ID: {project.id}",
+                ],
+            )
+    db.add(
+        ProjectProcessingLog(
+            project_id=project.id,
+            actor_admin_id=admin.id,
+            stage="project_status",
+            status="ok",
+            details={"from": prev, "to": payload.status},
+        )
+    )
+    db.commit()
+    db.refresh(project)
+    owner = db.query(User).filter(User.id == project.owner_user_id).first() if project.owner_user_id else None
+    return {
+        "id": project.id,
+        "name": project.name,
+        "owner_user_id": project.owner_user_id,
+        "owner_email": owner.email if owner else None,
+        "status": project.status,
+        "created_at": project.created_at.isoformat() if project.created_at else None,
+        "published_at": project.published_at.isoformat() if project.published_at else None,
+    }
+
+
+@router.post("/projects/{project_id}/processing-log", response_model=ProcessingLogEntry)
+def append_processing_log(
+    project_id: int,
+    payload: ProcessingLogCreate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == admin.tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    latest_order = (
+        db.query(StudyOrder)
+        .filter(StudyOrder.project_id == project_id)
+        .order_by(StudyOrder.created_at.desc())
+        .first()
+    )
+    row = ProjectProcessingLog(
+        project_id=project_id,
+        order_id=latest_order.id if latest_order else None,
+        actor_admin_id=admin.id,
+        stage=str(payload.stage).strip().lower(),
+        status=str(payload.status).strip().lower() or "ok",
+        details=payload.details or {},
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {
+        "id": row.id,
+        "project_id": row.project_id,
+        "order_id": row.order_id,
+        "actor_admin_id": row.actor_admin_id,
+        "stage": row.stage,
+        "status": row.status,
+        "details": row.details or {},
+        "created_at": row.created_at.isoformat() if row.created_at else "",
+    }
+
+
 @router.delete("/projects/{project_id}")
-def delete_project(project_id: int, db: Session = Depends(get_db), tenant_id: int = Depends(tenant_from_jwt)):
+def delete_project(
+    project_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+    _admin: User = Depends(require_admin),
+):
     project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")

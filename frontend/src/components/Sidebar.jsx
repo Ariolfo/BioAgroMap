@@ -26,6 +26,7 @@ export default function Sidebar({
   onOpenPreproGallery,
   onOpenPreproClusterViz,
   token,
+  userRole,
   email,
   setEmail,
   password,
@@ -52,8 +53,14 @@ export default function Sidebar({
   stackMode,
   setStackMode,
   onLogin,
-  onRegister,
   onLogout,
+  authStep = "email",
+  otpDebug = null,
+  onContinueEmail,
+  onVerifyOtp,
+  onResetEmailStep,
+  onOpenStudyRequest,
+  onOpenStudyOrders,
   onSelectProject,
   onCreateProject,
   onUpdateProject,
@@ -62,6 +69,8 @@ export default function Sidebar({
   onZoomToLayer,
   onHideLayer,
   onOpenDashboard,
+  onOpenClientDashboard,
+  onOpenUserManagement,
   onUploadLote,
   onUploadRaster,
   onRunAI,
@@ -113,6 +122,11 @@ export default function Sidebar({
     setLayersPanelOpen(false);
   }, [visualIndexGalleryKickPs]);
 
+  const isAdmin = !!token && userRole === "admin";
+  const isCliente = !!token && userRole === "cliente";
+  const showStudyCta = !!token && isCliente;
+  const canShowAdminTabs = isAdmin;
+  const canShowClientDashboardTab = isCliente;
   return (
     <aside className="panel">
       <img className="brand-logo" src="/logo-bioagro.png" alt="BioAgroMap" />
@@ -127,62 +141,81 @@ export default function Sidebar({
             setLayersPanelOpen(false);
           }}
         >
-          Admin
+          Ingresar
         </button>
-        <button
-          role="tab"
-          aria-selected={panelOpen && activeTab === "cargar"}
-          className={panelOpen && activeTab === "cargar" ? "active" : ""}
-          onClick={() => {
-            setActiveTab("cargar");
-            setPanelOpen(true);
-            setLayersPanelOpen(false);
-          }}
-        >
-          Cargar
-        </button>
-        <button
-          role="tab"
-          aria-selected={panelOpen && activeTab === "s1"}
-          type="button"
-          className={
-            (panelOpen && activeTab === "s1" ? "active " : "") + "top-tab-s1"
-          }
-          onClick={() => {
-            setActiveTab("s1");
-            setPanelOpen(true);
-            setLayersPanelOpen(false);
-          }}
-        >
-          SI
-        </button>
-        <button
-          role="tab"
-          aria-selected={panelOpen && activeTab === "prepro"}
-          className={panelOpen && activeTab === "prepro" ? "active" : ""}
-          onClick={() => {
-            setActiveTab("prepro");
-            setPanelOpen(true);
-            setLayersPanelOpen(false);
-            if (isS1StackMode(stackMode)) setStackMode("visual-rgb");
-          }}
-        >
-          S2
-        </button>
-        <button
-          role="tab"
-          aria-selected={panelOpen && activeTab === "ps"}
-          type="button"
-          className={(panelOpen && activeTab === "ps" ? "active " : "") + "top-tab-ps"}
-          onClick={() => {
-            setActiveTab("ps");
-            setPanelOpen(true);
-            setLayersPanelOpen(false);
-            if (isS1StackMode(stackMode)) setStackMode("visual-rgb");
-          }}
-        >
-          PS
-        </button>
+        {canShowAdminTabs ? (
+          <>
+            <button
+              role="tab"
+              aria-selected={panelOpen && activeTab === "cargar"}
+              className={panelOpen && activeTab === "cargar" ? "active" : ""}
+              onClick={() => {
+                setActiveTab("cargar");
+                setPanelOpen(true);
+                setLayersPanelOpen(false);
+              }}
+            >
+              Cargar
+            </button>
+            <button
+              role="tab"
+              aria-selected={panelOpen && activeTab === "s1"}
+              type="button"
+              className={
+                (panelOpen && activeTab === "s1" ? "active " : "") + "top-tab-s1"
+              }
+              onClick={() => {
+                setActiveTab("s1");
+                setPanelOpen(true);
+                setLayersPanelOpen(false);
+              }}
+            >
+              SI
+            </button>
+            <button
+              role="tab"
+              aria-selected={panelOpen && activeTab === "prepro"}
+              className={panelOpen && activeTab === "prepro" ? "active" : ""}
+              onClick={() => {
+                setActiveTab("prepro");
+                setPanelOpen(true);
+                setLayersPanelOpen(false);
+                if (isS1StackMode(stackMode)) setStackMode("visual-rgb");
+              }}
+            >
+              S2
+            </button>
+            <button
+              role="tab"
+              aria-selected={panelOpen && activeTab === "ps"}
+              type="button"
+              className={(panelOpen && activeTab === "ps" ? "active " : "") + "top-tab-ps"}
+              onClick={() => {
+                setActiveTab("ps");
+                setPanelOpen(true);
+                setLayersPanelOpen(false);
+                if (isS1StackMode(stackMode)) setStackMode("visual-rgb");
+              }}
+            >
+              PS
+            </button>
+          </>
+        ) : null}
+        {canShowClientDashboardTab ? (
+          <button
+            role="tab"
+            aria-selected={panelOpen && activeTab === "dashboard"}
+            className={panelOpen && activeTab === "dashboard" ? "active" : ""}
+            onClick={() => {
+              setActiveTab("dashboard");
+              setPanelOpen(true);
+              setLayersPanelOpen(false);
+              onOpenClientDashboard?.();
+            }}
+          >
+            Dashboard
+          </button>
+        ) : null}
         <button
           role="tab"
           aria-selected={layersPanelOpen}
@@ -206,7 +239,7 @@ export default function Sidebar({
           onZoomToLayer={onZoomToLayer}
           onHideLayer={onHideLayer}
           onOpenDashboard={onOpenDashboard}
-          dashboardDisabled={!token || !projectId}
+          dashboardDisabled={!token || !projectId || userRole !== "admin"}
         />
       ) : null}
 
@@ -219,28 +252,109 @@ export default function Sidebar({
               password={password}
               setPassword={setPassword}
               loading={loading}
+              authStep={authStep}
+              otpDebug={otpDebug}
+              onContinueEmail={onContinueEmail}
+              onVerifyOtp={onVerifyOtp}
+              onResetEmailStep={onResetEmailStep}
               onLogin={onLogin}
-              onRegister={onRegister}
             />
           ) : (
-            <ProjectList
-              projects={projects}
-              projectId={projectId}
-              projectName={projectName}
-              setProjectName={setProjectName}
-              loading={loading}
-              onSelectProject={onSelectProject}
-              onCreateProject={onCreateProject}
-              onUpdateProject={onUpdateProject}
-              onDeleteProject={onDeleteProject}
-              onLogout={onLogout}
-              email={email}
-            />
+            <>
+              <div className="session-info">
+                <span>{email} ({userRole || "sin rol"})</span>
+                <button onClick={onLogout} disabled={loading} className="btn-link">
+                  Cerrar sesion
+                </button>
+              </div>
+              {showStudyCta ? (
+                <button
+                  type="button"
+                  className="study-primary-cta"
+                  onClick={() => onOpenStudyRequest?.()}
+                  disabled={loading}
+                >
+                  Solicitar estudio AgroGeoFísico
+                </button>
+              ) : null}
+              {isAdmin ? (
+                <button
+                  type="button"
+                  className="layers-dashboard-btn"
+                  onClick={() => onOpenUserManagement?.()}
+                  disabled={loading}
+                  title="Abrir gestion de usuarios y roles"
+                >
+                  Gestion Usuario
+                </button>
+              ) : null}
+              {isAdmin ? (
+                <button
+                  type="button"
+                  className="layers-dashboard-btn study-orders-btn"
+                  onClick={() => onOpenStudyOrders?.()}
+                  disabled={loading}
+                  title="Ver solicitudes AgroGeoFísico"
+                >
+                  Gestion de ordenes
+                </button>
+              ) : null}
+              {isAdmin ? (
+                <ProjectList
+                  projects={projects}
+                  projectId={projectId}
+                  projectName={projectName}
+                  setProjectName={setProjectName}
+                  loading={loading}
+                  onSelectProject={onSelectProject}
+                  onCreateProject={onCreateProject}
+                  onUpdateProject={onUpdateProject}
+                  onDeleteProject={onDeleteProject}
+                  onLogout={onLogout}
+                  email={email}
+                  hideSessionHeader
+                />
+              ) : (
+                <div className="projects-empty">
+                  Sesion iniciada como cliente. Usa el boton "Dashboard" para ver tus proyectos.
+                </div>
+              )}
+            </>
           )}
         </>
       ) : null}
 
-      {panelOpen && !layersPanelOpen && activeTab === "s1" ? (
+      {panelOpen && !layersPanelOpen && activeTab === "dashboard" && isCliente ? (
+        <>
+          {showStudyCta ? (
+            <button
+              type="button"
+              className="study-primary-cta"
+              onClick={() => onOpenStudyRequest?.()}
+              disabled={loading}
+            >
+              Solicitar estudio AgroGeoFísico
+            </button>
+          ) : null}
+          <ProjectList
+            projects={projects}
+            projectId={projectId}
+            projectName={projectName}
+            setProjectName={setProjectName}
+            loading={loading}
+            onSelectProject={onSelectProject}
+            onCreateProject={onCreateProject}
+            onUpdateProject={onUpdateProject}
+            onDeleteProject={onDeleteProject}
+            onLogout={onLogout}
+            email={email}
+            readOnly
+            title="Dashboard - Mis Proyectos"
+          />
+        </>
+      ) : null}
+
+      {canShowAdminTabs && panelOpen && !layersPanelOpen && activeTab === "s1" ? (
         <Sentinel1Panel
           token={token}
           projectId={projectId}
@@ -266,7 +380,7 @@ export default function Sidebar({
         />
       ) : null}
 
-      {panelOpen && !layersPanelOpen && activeTab === "cargar" ? (
+      {canShowAdminTabs && panelOpen && !layersPanelOpen && activeTab === "cargar" ? (
         <UploadPanel
           token={token}
           projectId={projectId}
@@ -289,7 +403,7 @@ export default function Sidebar({
         />
       ) : null}
 
-      {panelOpen && !layersPanelOpen && activeTab === "prepro" ? (
+      {canShowAdminTabs && panelOpen && !layersPanelOpen && activeTab === "prepro" ? (
         <PreprocessPanel
           token={token}
           projectId={projectId}
@@ -319,7 +433,7 @@ export default function Sidebar({
         />
       ) : null}
 
-      {panelOpen && !layersPanelOpen && activeTab === "ps" ? (
+      {canShowAdminTabs && panelOpen && !layersPanelOpen && activeTab === "ps" ? (
         <PreprocessPanel
           token={token}
           projectId={projectId}

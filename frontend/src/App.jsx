@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import api, {
   clearAuthTokens,
@@ -18,6 +18,9 @@ import {
 import Sidebar from "./components/Sidebar";
 import MapView from "./components/MapView";
 import AdvancedDashboard from "./components/dashboard/AdvancedDashboard";
+import UserManagementModal from "./components/UserManagementModal";
+import StudyRequestModal from "./components/StudyRequestModal";
+import AdminStudyOrdersModal from "./components/AdminStudyOrdersModal";
 import { INDEX_CATALOG, INDEX_CATALOG_PS } from "./components/PreprocessPanel";
 
 const INDEX_IDS_S2 = new Set(
@@ -39,6 +42,7 @@ export default function App() {
   const mapRef = useRef(null);
   const indexStacksVariantRef = useRef("s2");
   const [token, setToken] = useState("");
+  const [userRole, setUserRole] = useState("");
   const [projectId, setProjectId] = useState("");
   const [projects, setProjects] = useState([]);
   const [email, setEmail] = useState("");
@@ -78,6 +82,34 @@ export default function App() {
   const [clusterElbowResultsS1, setClusterElbowResultsS1] = useState(null);
   const [clusterGmmResultsS1, setClusterGmmResultsS1] = useState(null);
   const [dashboardOpen, setDashboardOpen] = useState(false);
+  const [userMgmtOpen, setUserMgmtOpen] = useState(false);
+  const [authStep, setAuthStep] = useState("email");
+  const [pendingRegEmail, setPendingRegEmail] = useState("");
+  const [otpDebug, setOtpDebug] = useState(null);
+  const [studyRequestOpen, setStudyRequestOpen] = useState(false);
+  const [studyOrdersOpen, setStudyOrdersOpen] = useState(false);
+  const [studyDraw, setStudyDraw] = useState(null);
+  const isAdmin = userRole === "admin";
+  const isCliente = userRole === "cliente";
+
+  const finalizeStudyPolygon = useCallback(() => {
+    setStudyDraw((d) => {
+      if (!d?.active || d.mode !== "polygon") return d;
+      return { ...d, finalizePolygonKey: (d.finalizePolygonKey || 0) + 1 };
+    });
+  }, []);
+
+  function requireAdminAction() {
+    if (!token) {
+      setMessage("Debes iniciar sesion.");
+      return false;
+    }
+    if (!isAdmin) {
+      setMessage("Acceso restringido: esta accion requiere rol admin.");
+      return false;
+    }
+    return true;
+  }
 
   useEffect(() => {
     setS2Download(null);
@@ -92,6 +124,10 @@ export default function App() {
     setRecorteKind("");
     setPsExtractTaskId("");
     setDashboardOpen(false);
+    setUserMgmtOpen(false);
+    setStudyRequestOpen(false);
+    setStudyOrdersOpen(false);
+    setStudyDraw(null);
   }, [projectId]);
 
   useEffect(() => {
@@ -113,6 +149,37 @@ export default function App() {
       persistAuthTokens(access, refresh);
     }
   }, []);
+
+  useEffect(() => {
+    if (!token) {
+      setUserRole("");
+      return;
+    }
+    let cancelled = false;
+    const loadMe = async () => {
+      try {
+        setAuthToken(token);
+        const res = await api.get("/auth/me");
+        if (!cancelled) setUserRole(String(res.data?.role || ""));
+      } catch (_) {
+        if (!cancelled) setUserRole("");
+      }
+    };
+    loadMe();
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
+
+  useEffect(() => {
+    if (!token) {
+      setSidebarTab("admin");
+      return;
+    }
+    if (userRole === "cliente") {
+      setSidebarTab("dashboard");
+    }
+  }, [token, userRole]);
 
   useEffect(() => {
     const onRefreshed = (e) => {
@@ -610,6 +677,7 @@ export default function App() {
   }
 
   async function updateProjectName(id, name) {
+    if (!requireAdminAction()) return false;
     const trimmed = name.trim();
     if (!trimmed) {
       setMessage("Error: el nombre del proyecto no puede estar vacío.");
@@ -632,6 +700,7 @@ export default function App() {
   }
 
   async function deleteProject(id) {
+    if (!requireAdminAction()) return;
     const proj = projects.find((p) => p.id === id);
     const projName = proj ? proj.name : `ID ${id}`;
     if (!window.confirm(`Eliminar el proyecto "${projName}" y todas sus capas?`)) return;
@@ -673,6 +742,7 @@ export default function App() {
       });
       const accessToken = res.data.access_token;
       setToken(accessToken);
+      setUserRole(String(res.data.role || ""));
       persistAuthTokens(accessToken, res.data.refresh_token);
       const userProjects = await fetchProjects(accessToken);
       setMessage(`Cuenta creada. ${userProjects.length} proyecto(s) encontrado(s).`);
@@ -702,9 +772,13 @@ export default function App() {
       });
       const accessToken = res.data.access_token;
       setToken(accessToken);
+      setUserRole(String(res.data.role || ""));
       persistAuthTokens(accessToken, res.data.refresh_token);
       const userProjects = await fetchProjects(accessToken);
       setMessage(`Sesion iniciada. ${userProjects.length} proyecto(s) encontrado(s).`);
+      setAuthStep("email");
+      setOtpDebug(null);
+      setPendingRegEmail("");
       navigate("/app");
     } catch (error) {
       const detail = error?.response?.data?.detail || error.message || "Error al iniciar sesion";
@@ -714,18 +788,113 @@ export default function App() {
     }
   }
 
+  function resetEmailAuthStep() {
+    setAuthStep("email");
+    setPendingRegEmail("");
+    setOtpDebug(null);
+    setPassword("");
+    setMessage("");
+  }
+
+  async function continueEmailFlow() {
+    const em = email.trim();
+    if (!em) {
+      setMessage("Ingrese su correo electrónico.");
+      return;
+    }
+    setLoading(true);
+    setMessage("");
+    try {
+      const r = await api.post("/auth/check-email", { email: em });
+      if (r.data?.exists) {
+        const isAdmin = !!r.data?.is_admin || String(r.data?.role || "").toLowerCase() === "admin";
+        if (isAdmin) {
+          setAuthStep("password");
+          setMessage("Correo admin detectado. Ingrese su contraseña para continuar.");
+        } else {
+          const o = await api.post("/auth/request-otp", { email: em });
+          setPendingRegEmail(em);
+          setAuthStep("otp");
+          setOtpDebug(o.data?.debug_otp ?? null);
+          setMessage(
+            o.data?.message ||
+              "Se enviará un código de verificación a su correo."
+          );
+        }
+      } else {
+        const o = await api.post("/auth/request-otp", { email: em });
+        setPendingRegEmail(em);
+        setAuthStep("otp");
+        setOtpDebug(o.data?.debug_otp ?? null);
+        setMessage(
+          o.data?.message ||
+            "Se enviará un código de verificación a su correo."
+        );
+      }
+    } catch (error) {
+      const detail = error?.response?.data?.detail || error.message || "Error al comprobar el correo";
+      setMessage(`Error: ${detail}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function verifyOtpRegister(code) {
+    const c = String(code || "").trim();
+    if (!pendingRegEmail || !c) {
+      setMessage("Ingrese el código recibido.");
+      return;
+    }
+    setLoading(true);
+    setMessage("");
+    try {
+      const res = await api.post("/auth/verify-otp", { email: pendingRegEmail, code: c });
+      const accessToken = res.data.access_token;
+      setToken(accessToken);
+      setUserRole(String(res.data.role || ""));
+      persistAuthTokens(accessToken, res.data.refresh_token);
+      const userProjects = await fetchProjects(accessToken);
+      const tpw = res.data.temporary_password;
+      if (tpw) {
+        setMessage(
+          `Cuenta creada. Guarde su contraseña para próximos accesos: ${tpw} (${userProjects.length} proyecto(s).)`
+        );
+      } else {
+        setMessage(`Código verificado. Sesión iniciada. ${userProjects.length} proyecto(s).`);
+      }
+      setAuthStep("email");
+      setOtpDebug(null);
+      setPendingRegEmail("");
+      navigate("/app");
+    } catch (error) {
+      const detail = error?.response?.data?.detail || error.message || "Código incorrecto o expirado";
+      setMessage(`Error: ${detail}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
   function logoutSession() {
     setToken("");
+    setUserRole("");
     clearAuthTokens();
     setProjectId("");
     setProjects([]);
     setTargetRasterId("");
+    setUserMgmtOpen(false);
+    setStudyRequestOpen(false);
+    setStudyOrdersOpen(false);
+    setStudyDraw(null);
+    setAuthStep("email");
+    setPendingRegEmail("");
+    setOtpDebug(null);
     clearAllMapLayers();
     setMessage("Sesion cerrada.");
     navigate("/");
   }
 
   async function createProject() {
+    if (!requireAdminAction()) return;
     const finalName = projectName.trim();
     if (!finalName) {
       setMessage("Error: ingresa un nombre para el proyecto.");
@@ -749,6 +918,7 @@ export default function App() {
   }
 
   async function uploadLote() {
+    if (!requireAdminAction()) return null;
     if (!token || !projectId || !loteFile) {
       setMessage("Error: debes iniciar sesion, crear proyecto y seleccionar archivo de lote.");
       return;
@@ -796,6 +966,7 @@ export default function App() {
   }
 
   async function uploadRaster() {
+    if (!requireAdminAction()) return;
     if (!token || !projectId || !rasterFile) {
       setMessage("Error: debes iniciar sesion, crear proyecto y seleccionar raster.");
       return;
@@ -840,6 +1011,7 @@ export default function App() {
   }
 
   async function runAI() {
+    if (!requireAdminAction()) return;
     if (!projectId || !targetRasterId) {
       setMessage("Error: define un raster objetivo para ejecutar IA.");
       return;
@@ -864,6 +1036,7 @@ export default function App() {
   }
 
   async function preprocessDownload(startDate, endDate, layerId, s1AoiFile) {
+    if (!requireAdminAction()) return;
     if (!token || !projectId) {
       setMessage("Error: debes iniciar sesion y crear proyecto.");
       return;
@@ -936,6 +1109,7 @@ export default function App() {
   }
 
   async function runS2L2aRecortes(layerId, productNames, sourceSubpath, pipelineVariant = "s2") {
+    if (!requireAdminAction()) return false;
     if (!token || !projectId) {
       setMessage("Error: inicia sesion y selecciona un proyecto.");
       return false;
@@ -985,6 +1159,7 @@ export default function App() {
   }
 
   async function runS1GrdRecortes(layerId, productPaths) {
+    if (!requireAdminAction()) return false;
     if (!token || !projectId) {
       setMessage("Error: inicia sesion y selecciona un proyecto.");
       return false;
@@ -1030,6 +1205,7 @@ export default function App() {
   }
 
   async function runPsPlanetExtract() {
+    if (!requireAdminAction()) return false;
     if (!token || !projectId) {
       setMessage("Error: inicia sesión y selecciona un proyecto.");
       return;
@@ -1051,6 +1227,7 @@ export default function App() {
   }
 
   async function runS2IndexStacks(explicitRasterIds, opts = {}) {
+    if (!requireAdminAction()) return false;
     const pipelineVariant = opts.pipelineVariant === "ps" ? "ps" : "s2";
     const recorteFilenames = Array.isArray(opts?.recorteFilenames)
       ? [...new Set(opts.recorteFilenames.map((s) => String(s).trim()).filter(Boolean))]
@@ -1101,6 +1278,7 @@ export default function App() {
   }
 
   async function runS1SarIndexStacks({ sceneVvRelpaths, indices }) {
+    if (!requireAdminAction()) return false;
     const paths = Array.isArray(sceneVvRelpaths)
       ? [...new Set(sceneVvRelpaths.map((s) => String(s).trim().replace(/\\/g, "/")).filter(Boolean))]
       : [];
@@ -1138,6 +1316,7 @@ export default function App() {
   }
 
   async function runClusterElbow(pipelineVariant = "s2", selectedDates = []) {
+    if (!requireAdminAction()) return;
     if (!token || !projectId) {
       setMessage("Error: define proyecto.");
       return;
@@ -1179,6 +1358,7 @@ export default function App() {
   }
 
   async function runClusterGmm(kByKey, pipelineVariant = "s2", selectedDates = []) {
+    if (!requireAdminAction()) return;
     if (!token || !projectId) {
       setMessage("Error: define proyecto.");
       return;
@@ -1250,6 +1430,7 @@ export default function App() {
           setPreproClusterVizKick((k) => k + 1);
         }}
         token={token}
+        userRole={userRole}
         email={email}
         setEmail={setEmail}
         password={password}
@@ -1274,7 +1455,6 @@ export default function App() {
         stackMode={stackMode}
         setStackMode={setStackMode}
         onLogin={loginWithCredentials}
-        onRegister={registerAndLogin}
         onLogout={logoutSession}
         onSelectProject={(id) => selectProject(id, token)}
         onCreateProject={createProject}
@@ -1283,7 +1463,42 @@ export default function App() {
         onToggleVisibility={toggleLayerVisibility}
         onZoomToLayer={zoomToLayer}
         onHideLayer={(lid) => setLayerVisibility(lid, false)}
-        onOpenDashboard={() => setDashboardOpen(true)}
+        onOpenDashboard={() => {
+          if (!isAdmin) {
+            setMessage("Acceso restringido: dashboard avanzado solo para admin.");
+            return;
+          }
+          setDashboardOpen(true);
+        }}
+        onOpenClientDashboard={() => {
+          if (token) fetchProjects(token);
+        }}
+        onOpenUserManagement={() => {
+          if (!isAdmin) {
+            setMessage("Acceso restringido: Gestion de usuarios solo para admin.");
+            return;
+          }
+          setUserMgmtOpen(true);
+        }}
+        onOpenStudyRequest={() => {
+          if (!token) {
+            setMessage("Debe iniciar sesión.");
+            return;
+          }
+          setStudyRequestOpen(true);
+        }}
+        onOpenStudyOrders={() => {
+          if (!isAdmin) {
+            setMessage("Solo administradores.");
+            return;
+          }
+          setStudyOrdersOpen(true);
+        }}
+        authStep={authStep}
+        otpDebug={otpDebug}
+        onContinueEmail={continueEmailFlow}
+        onVerifyOtp={verifyOtpRegister}
+        onResetEmailStep={resetEmailAuthStep}
         onUploadLote={uploadLote}
         onUploadRaster={uploadRaster}
         onRunAI={runAI}
@@ -1328,12 +1543,41 @@ export default function App() {
         token={token}
         baseStyle={baseStyle}
         setBaseStyle={setBaseStyle}
+        studyDraw={studyDraw}
       />
       <AdvancedDashboard
-        open={dashboardOpen}
+        open={dashboardOpen && isAdmin}
         onClose={() => setDashboardOpen(false)}
         token={token}
         projectId={projectId}
+      />
+      <UserManagementModal
+        open={userMgmtOpen && isAdmin}
+        token={token}
+        onClose={() => setUserMgmtOpen(false)}
+        onStatusMessage={(msg) => setMessage(msg)}
+      />
+      <StudyRequestModal
+        open={studyRequestOpen && !!token}
+        token={token}
+        onClose={() => {
+          setStudyRequestOpen(false);
+          setStudyDraw(null);
+        }}
+        addMapLayer={addMapLayer}
+        paintLayerOnMap={paintLayerOnMap}
+        mapRef={mapRef}
+        bboxFromGeojson={bboxFromGeojson}
+        setStudyDraw={setStudyDraw}
+        finalizeStudyPolygon={finalizeStudyPolygon}
+        setMessage={setMessage}
+        drawMode={studyDraw?.mode}
+      />
+      <AdminStudyOrdersModal
+        open={studyOrdersOpen && isAdmin}
+        token={token}
+        onClose={() => setStudyOrdersOpen(false)}
+        onStatusMessage={(msg) => setMessage(msg)}
       />
     </div>
   );

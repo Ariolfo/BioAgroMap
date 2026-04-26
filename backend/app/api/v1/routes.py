@@ -7,6 +7,7 @@ from app.api.v1.layers import router as layers_router
 from app.api.v1.preprocess import router as preprocess_router
 from app.api.v1.projects import router as projects_router
 from app.api.v1.rasters import router as rasters_router
+from app.api.v1.study_orders import router as study_orders_router
 
 router = APIRouter()
 router.include_router(auth_router)
@@ -16,3 +17,4 @@ router.include_router(rasters_router)
 router.include_router(ai_router)
 router.include_router(preprocess_router)
 router.include_router(cluster_analysis_router)
+router.include_router(study_orders_router)
