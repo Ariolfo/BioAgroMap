@@ -1,6 +1,7 @@
 import json
 import io
 import logging
+import math
 import re
 import tempfile
 import uuid
@@ -12,9 +13,14 @@ from urllib.request import urlopen
 
 import numpy as np
 import rasterio
+from rasterio.transform import xy
+from matplotlib import colormaps
+from matplotlib.path import Path as MplPath
 from PIL import Image
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse, Response
 from sklearn.cluster import KMeans
+from shapely.geometry import Polygon
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_project_dashboard_access, tenant_from_jwt
@@ -893,7 +899,9 @@ def get_recortes_inventory(
     }
 
 
-def _load_soilplus_dem_band1(project_id: int, tenant_id: int) -> tuple[Path, np.ndarray, np.ndarray]:
+def _load_soilplus_dem_band1(
+    project_id: int, tenant_id: int
+) -> tuple[Path, np.ndarray, np.ndarray, rasterio.Affine]:
     dem_path = _tenant_storage(tenant_id, project_id, "dem") / "band_1.img"
     if not dem_path.is_file():
         raise HTTPException(
@@ -903,6 +911,7 @@ def _load_soilplus_dem_band1(project_id: int, tenant_id: int) -> tuple[Path, np.
     try:
         with rasterio.open(dem_path) as src:
             arr = src.read(1).astype(np.float64)
+            transform = src.transform
             nd = src.nodatavals[0] if src.nodatavals else None
             if nd is not None and np.isfinite(nd):
                 arr = np.where(arr == float(nd), np.nan, arr)
@@ -913,7 +922,81 @@ def _load_soilplus_dem_band1(project_id: int, tenant_id: int) -> tuple[Path, np.
     mask = np.isfinite(arr) & (arr > 0)
     if int(np.count_nonzero(mask)) <= 0:
         raise HTTPException(status_code=400, detail="DEM sin píxeles válidos (>0).")
-    return dem_path, arr, mask
+    return dem_path, arr, mask, transform
+
+
+def _soilplus_aspect_slope_deg(
+    arr: np.ndarray, mask: np.ndarray, transform: rasterio.Affine
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Aspecto (grados, 0=N, 90=E, horario) y pendiente (grados) con gradiente de NumPy y paso del geotransform.
+    """
+    res_x = abs(float(transform.a))
+    res_y = abs(float(transform.e))
+    if res_x <= 0 or res_y <= 0:
+        res_x = max(res_x, 1.0)
+        res_y = max(res_y, 1.0)
+    z = np.where(mask, arr, np.nan)
+    gy, gx = np.gradient(z, res_y, res_x)
+    slope_deg = np.degrees(np.arctan(np.hypot(gx, gy)))
+    aspect_deg = np.degrees(np.arctan2(-gx, gy))
+    aspect_deg = np.where(np.isfinite(aspect_deg), (aspect_deg + 360.0) % 360.0, np.nan)
+    slope_deg = np.where(mask, slope_deg, np.nan)
+    aspect_deg = np.where(mask, aspect_deg, np.nan)
+    return aspect_deg, slope_deg
+
+
+def _soilplus_f123_from_roi_dem(
+    arr: np.ndarray,
+    mask: np.ndarray,
+    eff: np.ndarray,
+    transform: rasterio.Affine,
+) -> dict[str, float]:
+    """
+    f1 = DEM en ROI (media de elevación normalizada 0–1 en ROI);
+    f2 = aspecto; f3 = pendiente — mismas normalizaciones por min-max en ROI.
+    """
+    dem_flat = arr[eff].astype(np.float64)
+    if dem_flat.size <= 0:
+        raise HTTPException(status_code=400, detail="ROI sin píxeles DEM válidos.")
+    aspect_map, slope_map = _soilplus_aspect_slope_deg(arr, mask, transform)
+    # Calcular derivadas en máscara DEM completa; leer solo ROI
+    aspect_flat = aspect_map[eff]
+    slope_flat = slope_map[eff]
+    aspect_flat = aspect_flat[np.isfinite(aspect_flat)]
+    slope_flat = slope_flat[np.isfinite(slope_flat)]
+    if aspect_flat.size == 0:
+        aspect_flat = np.array([0.0], dtype=np.float64)
+    if slope_flat.size == 0:
+        slope_flat = np.array([0.0], dtype=np.float64)
+
+    def _mean_minmax(flat: np.ndarray) -> float:
+        lo = float(np.min(flat))
+        hi = float(np.max(flat))
+        den = max(hi - lo, 1e-12)
+        return float(np.mean((flat - lo) / den))
+
+    f1 = _mean_minmax(dem_flat)
+    f2 = _mean_minmax(aspect_flat)
+    f3 = _mean_minmax(slope_flat)
+    return {
+        "f1": f1,
+        "f2": f2,
+        "f3": f3,
+        "dem_roi_mean": float(np.mean(dem_flat)),
+        "dem_roi_min": float(np.min(dem_flat)),
+        "dem_roi_max": float(np.max(dem_flat)),
+        "aspect_roi_mean_deg": float(
+            np.mean(aspect_map[eff][np.isfinite(aspect_map[eff])])
+        )
+        if np.any(np.isfinite(aspect_map[eff]))
+        else 0.0,
+        "slope_roi_mean_deg": float(
+            np.mean(slope_map[eff][np.isfinite(slope_map[eff])])
+        )
+        if np.any(np.isfinite(slope_map[eff]))
+        else 0.0,
+    }
 
 
 def _soilplus_box_sum(arr2d: np.ndarray, radius: int) -> np.ndarray:
@@ -923,23 +1006,156 @@ def _soilplus_box_sum(arr2d: np.ndarray, radius: int) -> np.ndarray:
     return integ[k:, k:] - integ[:-k, k:] - integ[k:, :-k] + integ[:-k, :-k]
 
 
-def _soilplus_compute_cv(arr: np.ndarray, mask: np.ndarray, window_size: int) -> tuple[np.ndarray, np.ndarray, int]:
+def _soilplus_parse_roi_polygon(raw: str | None) -> np.ndarray | None:
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"roi_polygon JSON invalido: {exc}") from exc
+    if not isinstance(data, list) or len(data) < 3:
+        raise HTTPException(status_code=400, detail="roi_polygon requiere al menos 3 vertices [x,y] en pixeles DEM")
+    pts: list[list[float]] = []
+    for p in data:
+        if not isinstance(p, (list, tuple)) or len(p) < 2:
+            raise HTTPException(status_code=400, detail="cada vertice roi_polygon debe ser [x,y]")
+        pts.append([float(p[0]), float(p[1])])
+    return np.asarray(pts, dtype=np.float64)
+
+
+def _soilplus_polygon_mask(h: int, w: int, verts: np.ndarray) -> np.ndarray:
+    if verts.shape[0] < 3:
+        return np.zeros((h, w), dtype=bool)
+    yy, xx = np.mgrid[0:h, 0:w]
+    grid = np.column_stack([xx.ravel(), yy.ravel()])
+    path = MplPath(verts, closed=True)
+    inside = path.contains_points(grid, radius=0)
+    return inside.reshape(h, w)
+
+
+def _soilplus_resolve_cv_colormap(name: str) -> str:
+    key = str(name or "jet").strip().lower()
+    aliases = {
+        "jet": "jet",
+        "spectral": "Spectral",
+        "spectral_r": "Spectral_r",
+        "turbo": "turbo",
+        "viridis": "viridis",
+        "plasma": "plasma",
+    }
+    cmap_id = aliases.get(key, key)
+    try:
+        colormaps.get_cmap(cmap_id)
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(status_code=400, detail=f"Paleta de color no soportada: {name}") from exc
+    return cmap_id
+
+
+def _soilplus_compute_cv(
+    arr: np.ndarray,
+    mask: np.ndarray,
+    window_size: int,
+    *,
+    stats_mask: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """
+    CV local = std/mean en ventana. Solo los píxeles True en ``stats_mask`` (además DEM válido en ``mask``)
+    entran en suma, conteo y suma de cuadrados de la ventana. Si ``stats_mask`` es None, se usa ``mask``.
+    """
     ws = int(window_size)
     if ws % 2 == 0:
         ws += 1
     r = ws // 2
-    valid = np.isfinite(arr)
-    filled = np.where(valid, arr, 0.0)
+    incl = mask if stats_mask is None else (stats_mask.astype(bool) & mask)
+    filled = np.where(incl, arr, 0.0)
     sum_w = _soilplus_box_sum(filled, r)
-    cnt_w = _soilplus_box_sum(valid.astype(np.float64), r)
+    cnt_w = _soilplus_box_sum(incl.astype(np.float64), r)
     sumsq_w = _soilplus_box_sum(filled * filled, r)
     mean_w = np.divide(sum_w, cnt_w, out=np.zeros_like(sum_w), where=cnt_w > 0)
     var_w = np.divide(sumsq_w, cnt_w, out=np.zeros_like(sumsq_w), where=cnt_w > 0) - (mean_w * mean_w)
     var_w = np.maximum(var_w, 0.0)
     std_w = np.sqrt(var_w)
     cv_w = np.divide(std_w, mean_w, out=np.zeros_like(std_w), where=mean_w > 1e-9)
-    cv_w = np.where(mask, cv_w, np.nan)
-    return cv_w, cv_w[mask], ws
+    cv_w = np.where(incl, cv_w, np.nan)
+    return cv_w, cv_w[incl], ws
+
+
+def _normalize_soil_cv_engine(raw: str | None) -> str:
+    s = (raw or "fast").strip().lower()
+    if s in ("matlab", "mat", "matlab_cv", "matlab-cv"):
+        return "matlab"
+    return "fast"
+
+
+def _soilplus_compute_cv_matlab(
+    arr: np.ndarray,
+    mask: np.ndarray,
+    matlab_ws: int,
+    *,
+    stats_mask: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """
+    Réplica de ``CV.m``: ``padarray(dem,[ws,ws],0)``, ventana (2*ws+1)²,
+    ``nonzeros`` de la ventana, ``std/mean`` con std muestral (ddof=1).
+
+    El parámetro ``matlab_ws`` es el mismo ``ws`` que en MATLAB (medio ancho);
+    la ventana tiene lado ``2*matlab_ws+1`` (p. ej. ``ws=13`` → 27×27), distinto
+    del modo ``fast`` donde ``window_size`` es el lado impar en píxeles.
+    """
+    ws = max(1, int(matlab_ws))
+    ks = 2 * ws + 1
+    incl = mask if stats_mask is None else (stats_mask.astype(bool) & mask)
+    h, wdim = int(arr.shape[0]), int(arr.shape[1])
+    dem_in = np.where(mask, arr, 0.0).astype(np.float64, copy=False)
+    padded = np.pad(dem_in, ((ws, ws), (ws, ws)), mode="constant", constant_values=0.0)
+    cv_w = np.full((h, wdim), np.nan, dtype=np.float64)
+    rc = np.argwhere(incl)
+    for r, c in rc:
+        r = int(r)
+        c = int(c)
+        if padded[r + ws, c + ws] == 0.0:
+            cv_w[r, c] = 0.0
+            continue
+        win = padded[r : r + ks, c : c + ks]
+        nz = win.ravel()
+        nz = nz[nz != 0.0]
+        if nz.size < 2:
+            cv_w[r, c] = 0.0
+            continue
+        mu = float(np.mean(nz))
+        if mu <= 1e-12:
+            cv_w[r, c] = 0.0
+            continue
+        sig = float(np.std(nz, ddof=1))
+        cv_w[r, c] = sig / mu
+    flat = cv_w[incl].astype(np.float64)
+    flat = flat[np.isfinite(flat)]
+    return cv_w, flat, ws
+
+
+def _soilplus_compute_cv_dispatch(
+    arr: np.ndarray,
+    mask: np.ndarray,
+    window_size: int,
+    *,
+    stats_mask: np.ndarray | None,
+    cv_engine: str,
+) -> tuple[np.ndarray, np.ndarray, int, dict]:
+    """
+    CV local: modo ``fast`` (sumas en caja, ventana lado impar) o ``matlab`` (CV.m).
+
+    Para ``matlab``, ``window_size`` se interpreta como ``ws`` (medio radio MATLAB).
+    """
+    eng = _normalize_soil_cv_engine(cv_engine)
+    meta: dict[str, object] = {"cv_engine": eng}
+    if eng == "matlab":
+        cv_w, vec, mw = _soilplus_compute_cv_matlab(arr, mask, window_size, stats_mask=stats_mask)
+        meta["matlab_ws"] = int(window_size)
+        meta["cv_window_side_px"] = int(2 * mw + 1)
+        return cv_w, vec, mw, meta
+    cv_w, vec, ws = _soilplus_compute_cv(arr, mask, window_size, stats_mask=stats_mask)
+    meta["fast_window_px"] = int(ws)
+    return cv_w, vec, ws, meta
 
 
 def _soilplus_png_from_array(arr: np.ndarray, mask: np.ndarray) -> bytes:
@@ -956,6 +1172,311 @@ def _soilplus_png_from_array(arr: np.ndarray, mask: np.ndarray) -> bytes:
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
     return buf.getvalue()
+
+
+def _soilplus_png_cv_colormap(arr: np.ndarray, mask: np.ndarray, cmap_name: str) -> bytes:
+    """CV en color: min-max en ROI; fuera de máscara transparente (PNG RGBA)."""
+    vals = arr[mask]
+    if vals.size <= 0:
+        raise HTTPException(status_code=400, detail="No hay píxeles válidos para CV en la ROI.")
+    lo = float(np.nanmin(vals))
+    hi = float(np.nanmax(vals))
+    den = max(hi - lo, 1e-12)
+    t = np.clip((arr - lo) / den, 0.0, 1.0)
+    cmap = colormaps.get_cmap(cmap_name)
+    rgba = cmap(t)
+    rgb = (np.clip(rgba[:, :, :3], 0.0, 1.0) * 255.0).astype(np.uint8)
+    alpha = np.where(mask, 255, 0).astype(np.uint8)
+    out = np.dstack((rgb, alpha))
+    img = Image.fromarray(out, mode="RGBA")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
+def _soilplus_png_aspect_masked(aspect_deg: np.ndarray, eff: np.ndarray) -> bytes:
+    """Aspecto 0–360° en HSV cíclico; fuera de ROI transparente (PNG RGBA)."""
+    finite = eff & np.isfinite(aspect_deg)
+    if int(np.count_nonzero(finite)) <= 0:
+        raise HTTPException(status_code=400, detail="Sin aspecto válido en la ROI.")
+    t = np.where(finite, (np.mod(aspect_deg, 360.0)) / 360.0, 0.0)
+    cmap = colormaps.get_cmap("hsv")
+    rgba = cmap(t)
+    rgb = (np.clip(rgba[:, :, :3], 0.0, 1.0) * 255.0).astype(np.uint8)
+    alpha = np.where(finite, 255, 0).astype(np.uint8)
+    out = np.dstack((rgb, alpha))
+    img = Image.fromarray(out, mode="RGBA")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
+def _soilplus_png_slope_masked(slope_deg: np.ndarray, eff: np.ndarray) -> bytes:
+    """Pendiente en grados, paleta inferno; fuera de ROI transparente (PNG RGBA)."""
+    finite = eff & np.isfinite(slope_deg)
+    if int(np.count_nonzero(finite)) <= 0:
+        raise HTTPException(status_code=400, detail="Sin pendiente válida en la ROI.")
+    vals = slope_deg[finite]
+    lo = float(np.min(vals))
+    hi = float(np.max(vals))
+    den = max(hi - lo, 1e-12)
+    t = np.clip((slope_deg - lo) / den, 0.0, 1.0)
+    t = np.where(finite, t, 0.0)
+    cmap = colormaps.get_cmap("inferno")
+    rgba = cmap(t)
+    rgb = (np.clip(rgba[:, :, :3], 0.0, 1.0) * 255.0).astype(np.uint8)
+    alpha = np.where(finite, 255, 0).astype(np.uint8)
+    out = np.dstack((rgb, alpha))
+    img = Image.fromarray(out, mode="RGBA")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
+def _soilplus_effective_roi_mask(arr: np.ndarray, mask: np.ndarray, roi_verts: np.ndarray | None) -> np.ndarray:
+    if roi_verts is None:
+        return mask
+    h, w = int(arr.shape[0]), int(arr.shape[1])
+    poly = _soilplus_polygon_mask(h, w, roi_verts)
+    return mask & poly
+
+
+def _soilplus_roi_planar_area_m2(
+    roi_verts: np.ndarray | None,
+    mask: np.ndarray,
+    transform: rasterio.Affine,
+) -> float:
+    """Área en m² si el DEM está en CRS proyectada (típico). Sin polígono: píxeles válidos × tamaño de píxel."""
+    pixel_area = abs(float(transform.a) * float(transform.e))
+    if roi_verts is None or roi_verts.shape[0] < 3:
+        return float(np.count_nonzero(mask) * pixel_area)
+    coords: list[tuple[float, float]] = []
+    for col, row in roi_verts:
+        gx, gy = xy(transform, float(row), float(col), offset="center")
+        coords.append((float(gx), float(gy)))
+    poly = Polygon(coords)
+    if not poly.is_valid:
+        poly = poly.buffer(0)
+    return float(poly.area)
+
+
+def _soilplus_eff_pixel_rc_column_major(eff: np.ndarray) -> np.ndarray:
+    """Índices (row, col) recorriendo la máscara en orden columna-primero (como I(mask) en MATLAB)."""
+    h, w = int(eff.shape[0]), int(eff.shape[1])
+    cols = np.repeat(np.arange(w, dtype=np.int64), h)
+    rows = np.tile(np.arange(h, dtype=np.int64), w)
+    m = eff[rows, cols]
+    return np.column_stack([rows[m], cols[m]])
+
+
+def _soilplus_allocate_samples_per_cluster_dem(
+    dem: np.ndarray,
+    lab_map: np.ndarray,
+    eff: np.ndarray,
+    k: int,
+    snc: int,
+) -> tuple[np.ndarray, np.ndarray, list[int]]:
+    """
+    Reparto SNComp: snh = n·std/mean del DEM por zona (std muestral); SN = round(SNC·snh/sum(snh)),
+    ajustado para que la suma sea exactamente SNC.
+    """
+    k = int(k)
+    snc = int(max(1, snc))
+    snh = np.zeros(k, dtype=np.float64)
+    pix_counts: list[int] = []
+    for h in range(k):
+        m = eff & (lab_map == h)
+        pc = int(np.count_nonzero(m))
+        pix_counts.append(pc)
+        sec = dem[m]
+        if sec.size == 0:
+            continue
+        mu = float(np.mean(sec))
+        if mu <= 1e-9:
+            continue
+        std_s = float(np.std(sec, ddof=1)) if sec.size > 1 else 0.0
+        snh[h] = float(sec.size) * std_s / mu
+    tot = float(np.sum(snh))
+    if tot <= 1e-12:
+        base = snc // k
+        alloc = np.full(k, base, dtype=np.int64)
+        for i in range(snc - base * k):
+            alloc[i % k] += 1
+        return alloc, snh, pix_counts
+    raw = snc * snh / tot
+    alloc = np.rint(raw).astype(np.int64)
+    alloc = np.maximum(alloc, 0)
+    diff = int(snc - int(alloc.sum()))
+    if diff != 0:
+        frac = raw - alloc.astype(np.float64)
+        order = np.argsort(-frac) if diff > 0 else np.argsort(frac)
+        step = 0
+        while diff != 0 and step < k * max(abs(diff), 1) * 4:
+            j = int(order[step % k])
+            if diff > 0:
+                alloc[j] += 1
+                diff -= 1
+            elif alloc[j] > 0:
+                alloc[j] -= 1
+                diff += 1
+            step += 1
+    return alloc.astype(np.int64), snh, pix_counts
+
+
+def _soilplus_fishnet_origin_1based(window_size: int) -> int:
+    """
+    Origen MATLAB ``init = round(windowSize/2)`` índices en base 1; ``round``
+    aleja ties de cero para positivos (= ``floor(ws/2+0.5)``), sin ser ``numpy.round``.
+    """
+    ws = float(int(window_size))
+    return int(math.floor(ws / 2.0 + 0.5))
+
+
+def _soilplus_fishnet_candidates(lab_map: np.ndarray, eff: np.ndarray, fishnet_step: int) -> np.ndarray:
+    """
+    Equivalente a ``fishNet.m``: rejilla desde ``init:step:size`` en base 1; empares
+    (Y,X) ordenados como ``labels(y,x)(:)`` (**column-major**), no como ``np.ravel`` C.
+
+    Solo celdas en ``eff`` con etiqueta de zona válida (>= 0).
+    """
+    h, wdim = lab_map.shape
+    w = int(fishnet_step)
+    init_1b = max(1, _soilplus_fishnet_origin_1based(w))
+    init0 = max(0, init_1b - 1)
+    xs = np.arange(init0, wdim, w, dtype=np.int64)
+    ys = np.arange(init0, h, w, dtype=np.int64)
+    rows_cols: list[tuple[int, int]] = []
+    for j in range(xs.shape[0]):
+        ccol = int(xs[j])
+        for i in range(ys.shape[0]):
+            rrow = int(ys[i])
+            if not eff[rrow, ccol]:
+                continue
+            L = lab_map[rrow, ccol]
+            if L >= 0:
+                rows_cols.append((rrow, ccol))
+    if not rows_cols:
+        return np.zeros((0, 2), dtype=np.int64)
+    return np.array(rows_cols, dtype=np.int64)
+
+
+def _soilplus_sample_points_hoya_rs(
+    dem: np.ndarray,
+    aspect_deg: np.ndarray,
+    lab_map: np.ndarray,
+    eff: np.ndarray,
+    alloc: np.ndarray,
+    fishnet_step: int,
+    *,
+    m: float = 2.0,
+    seed: int = 42,
+) -> list[dict[str, int]]:
+    """
+    Muestreo fishNet + selectPoints: candidatos en rejilla; por zona, FCM 2D sobre
+    covariables DEM y aspecto (0–1 en ROI) y asignación greedy sobre columnas de U
+    (mismas filas que candidatos de fishNet en esa zona).
+    """
+    try:
+        import skfuzzy as fuzz
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Falta la dependencia scikit-fuzzy en el servidor. "
+                "Instala scikit-fuzzy (p. ej. pip install scikit-fuzzy==0.4.2). "
+                f"Detalle: {exc}"
+            ),
+        ) from exc
+
+    hh, ww = lab_map.shape
+    points_map = np.zeros((hh, ww), dtype=np.uint8)
+    for r, c in _soilplus_fishnet_candidates(lab_map, eff, fishnet_step):
+        points_map[int(r), int(c)] = 1
+
+    rc_cm = _soilplus_eff_pixel_rc_column_major(eff)
+    if rc_cm.size == 0:
+        return []
+    rs, cs = rc_cm[:, 0], rc_cm[:, 1]
+    dem_v = dem[rs, cs].astype(np.float64)
+    asp_v = np.nan_to_num(aspect_deg[rs, cs].astype(np.float64), nan=0.0, posinf=0.0, neginf=0.0)
+    lo_d, hi_d = float(np.min(dem_v)), float(np.max(dem_v))
+    lo_a, hi_a = float(np.min(asp_v)), float(np.max(asp_v))
+    den_d = max(hi_d - lo_d, 1e-12)
+    den_a = max(hi_a - lo_a, 1e-12)
+    f1 = (dem_v - lo_d) / den_d
+    f2 = (asp_v - lo_a) / den_a
+    features_cm = np.column_stack([f1, f2])
+    lab_vec = lab_map[rs, cs]
+
+    k = int(alloc.size)
+    for subr in range(k):
+        sub_clusters = int(alloc[subr])
+        if sub_clusters <= 0:
+            continue
+        reg = lab_vec == subr
+        if not np.any(reg):
+            continue
+        sub_feat = features_cm[reg]
+        n_region = int(sub_feat.shape[0])
+        rs_r = rs[reg]
+        cs_r = cs[reg]
+        sub_pts = np.zeros(n_region, dtype=np.int8)
+        for t in range(n_region):
+            sub_pts[t] = points_map[int(rs_r[t]), int(cs_r[t])]
+
+        n_cand = int(np.sum(sub_pts == 1))
+        if n_cand == 0:
+            logger.warning(
+                "Soil+ fishNet: zona %s sin candidatos en rejilla; no se ubican %s puntos.",
+                subr,
+                sub_clusters,
+            )
+            continue
+
+        c_fcm = max(1, min(sub_clusters, n_region))
+        try:
+            _cntr, u, _u0, _d, _jm, _p, _fpc = fuzz.cluster.cmeans(
+                sub_feat.T,
+                c=c_fcm,
+                m=float(m),
+                error=0.005,
+                maxiter=1000,
+                init=None,
+                seed=int(seed) + subr,
+            )
+        except Exception:
+            logger.warning("Soil+ selectPoints: FCM interno falló en zona %s", subr)
+            continue
+
+        coef = u[:, sub_pts == 1]
+        if coef.size == 0:
+            continue
+        work = coef.astype(np.float64).copy()
+        selected_local_cols: list[int] = []
+        for _it in range(sub_clusters):
+            if work.size == 0 or not np.any(work > 1e-18):
+                break
+            flat_i = int(np.argmax(work))
+            rr, cc = np.unravel_index(flat_i, work.shape)
+            selected_local_cols.append(int(cc))
+            work[rr, :] = 0.0
+            work[:, cc] = 0.0
+
+        indx = np.flatnonzero(sub_pts == 1)
+        for loc_col in selected_local_cols:
+            if loc_col < 0 or loc_col >= len(indx):
+                continue
+            li = int(indx[loc_col])
+            points_map[int(rs_r[li]), int(cs_r[li])] = 2
+
+    ys, xs = np.nonzero(points_map == 2)
+    out: list[dict[str, int]] = []
+    seq = 0
+    for yi, xi in zip(ys.tolist(), xs.tolist()):
+        cid = int(lab_map[int(yi), int(xi)])
+        out.append({"index": seq, "cluster": cid, "row": int(yi), "col": int(xi)})
+        seq += 1
+    return out
 
 
 def _soilplus_cluster_png(labels: np.ndarray, mask: np.ndarray, n_clusters: int) -> bytes:
@@ -986,6 +1507,151 @@ def _soilplus_cluster_png(labels: np.ndarray, mask: np.ndarray, n_clusters: int)
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
     return buf.getvalue()
+
+
+def _soilplus_saved_variant_slug(cv_engine: str) -> str:
+    """Nombre de archivo: ``fast`` vs ``matlab``."""
+    return "matlab" if _normalize_soil_cv_engine(cv_engine) == "matlab" else "fast"
+
+
+def _soilplus_execute_save_bundle(
+    project_id: int,
+    tenant_id: int,
+    *,
+    window_size: int,
+    cv_engine: str,
+    n_clusters: int,
+    fishnet_step: int,
+    roi_polygon: str | None,
+    total_samples: int | None,
+    cmap: str,
+    m: float,
+) -> dict[str, object]:
+    """
+    Pipeline Soil+ completo + escritura JSON y PNG en ``dem/soilplus_saved_{fast|matlab}.*``.
+    """
+    dem_path, arr, mask, transform = _load_soilplus_dem_band1(project_id, tenant_id)
+    verts = _soilplus_parse_roi_polygon(roi_polygon)
+    eff = _soilplus_effective_roi_mask(arr, mask, verts)
+    if int(np.count_nonzero(eff)) <= 0:
+        raise HTTPException(status_code=400, detail="ROI vacía.")
+    area_m2 = _soilplus_roi_planar_area_m2(verts, mask, transform)
+    area_ha = area_m2 / 10000.0
+    inferred = total_samples is None
+    if total_samples is not None:
+        snc = int(total_samples)
+    else:
+        snc = max(1, int(round(area_ha))) if area_ha > 0 else 60
+    stats_mask = eff if verts is not None else None
+    cv_w, _, _wu, cv_run_meta = _soilplus_compute_cv_dispatch(
+        arr, mask, window_size, stats_mask=stats_mask, cv_engine=cv_engine
+    )
+    lab_map = _soilplus_fcm_labels_from_cv_norm(cv_w, eff, int(n_clusters), m=m)
+    alloc, snh, pix_c = _soilplus_allocate_samples_per_cluster_dem(arr, lab_map, eff, int(n_clusters), snc)
+    aspect_deg, slope_deg = _soilplus_aspect_slope_deg(arr, mask, transform)
+    sample_points = _soilplus_sample_points_hoya_rs(
+        arr,
+        aspect_deg,
+        lab_map,
+        eff,
+        alloc,
+        int(fishnet_step),
+        m=m,
+        seed=42,
+    )
+    nk = int(n_clusters)
+    actual = np.zeros(nk, dtype=np.int64)
+    for pt in sample_points:
+        cid = int(pt.get("cluster", -1))
+        if 0 <= cid < nk:
+            actual[cid] += 1
+    placed = int(actual.sum())
+
+    rc_cm = _soilplus_eff_pixel_rc_column_major(eff)
+    cv_flat = cv_w[rc_cm[:, 0], rc_cm[:, 1]].astype(np.float64)
+    if not np.all(np.isfinite(cv_flat)):
+        cv_flat = np.nan_to_num(cv_flat, nan=0.0, posinf=0.0, neginf=0.0)
+    vmax = float(np.max(cv_flat))
+    if vmax > 1e-12:
+        cv_flat = cv_flat / vmax
+
+    ks_q: list[int] = []
+    q_list: list[float | None] = []
+    for k in range(2, 12):
+        ks_q.append(int(k))
+        qv = _soilplus_qcomp_from_cv_flat(cv_flat, k, m=float(m), seed=42)
+        q_list.append(float(qv) if np.isfinite(qv) else None)
+
+    cmap_id = _soilplus_resolve_cv_colormap(cmap)
+    dem_png = _soilplus_png_from_array(arr, mask)
+    cv_png = _soilplus_png_cv_colormap(cv_w, eff, cmap_id)
+    aspect_png = _soilplus_png_aspect_masked(aspect_deg, eff)
+    slope_png = _soilplus_png_slope_masked(slope_deg, eff)
+    fcm_png = _soilplus_cluster_png(lab_map, eff, int(n_clusters))
+
+    slug = _soilplus_saved_variant_slug(cv_engine)
+    ts = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+    roi_applied = bool(verts is not None)
+    dem_mean = float(np.mean(arr[mask])) if np.count_nonzero(mask) else 0.0
+    dem_roi_mean = float(np.mean(arr[eff])) if np.count_nonzero(eff) else 0.0
+
+    bundle: dict[str, object] = {
+        "saved_at": ts,
+        "project_id": int(project_id),
+        "cv_engine_slug": slug,
+        "cv_run": cv_run_meta,
+        "window_size": int(window_size),
+        "n_clusters": int(n_clusters),
+        "fishnet_step": int(fishnet_step),
+        "roi_polygon_applied": roi_applied,
+        "roi_polygon": roi_polygon if roi_applied else None,
+        "roi_pixel_count": int(np.count_nonzero(eff)),
+        "polygon_area_m2": float(area_m2),
+        "polygon_area_ha": float(area_ha),
+        "total_samples": int(snc),
+        "total_samples_placed": placed,
+        "total_samples_inferred": inferred,
+        "samples_requested_per_cluster": [int(x) for x in alloc],
+        "samples_per_cluster": [int(x) for x in actual],
+        "pixels_per_cluster": pix_c,
+        "dem_weight_per_cluster": [float(x) for x in snh],
+        "raster_shape": {"height": int(arr.shape[0]), "width": int(arr.shape[1])},
+        "sample_points": sample_points,
+        "q_curve": {"k_values": ks_q, "q_values": q_list, "m": float(m)},
+        "dem_input_image_path": str(dem_path),
+        "dem_mean_snapshot": dem_mean,
+        "dem_roi_mean_snapshot": dem_roi_mean,
+        "cv_mean_snapshot": float(np.mean(cv_w[np.isfinite(cv_w)])) if np.any(np.isfinite(cv_w)) else 0.0,
+        "cv_colormap": str(cmap),
+        "fc_m": float(m),
+    }
+    terr: dict[str, float] = {}
+    try:
+        stats = _soilplus_f123_from_roi_dem(arr, mask, eff, transform)
+        for key in ("f1", "f2", "f3"):
+            if key in stats:
+                terr[key] = float(stats[key])
+        for key in ("aspect_roi_mean_deg", "slope_roi_mean_deg"):
+            if key in stats:
+                terr[key] = float(stats[key])
+    except Exception:
+        pass
+    bundle["terrain"] = terr
+
+    root = _tenant_storage(tenant_id, project_id, "dem")
+    root.mkdir(parents=True, exist_ok=True)
+    pref = f"soilplus_saved_{slug}"
+    (root / f"{pref}.json").write_text(json.dumps(bundle, ensure_ascii=False, indent=2), encoding="utf-8")
+    for kind, blob in (
+        ("dem", dem_png),
+        ("cv", cv_png),
+        ("fcm", fcm_png),
+        ("aspect", aspect_png),
+        ("slope", slope_png),
+    ):
+        (root / f"{pref}_{kind}.png").write_bytes(blob)
+    return bundle
 
 
 @router.get("/preprocess/ps-soilplus-f1/{project_id}")
@@ -1063,7 +1729,12 @@ def get_ps_soilplus_f1_exact(
 @router.get("/preprocess/soilplus-dem-input/{project_id}")
 def get_soilplus_dem_input_stats(
     project_id: int,
-    window_size: int = Query(13, ge=3, le=101, description="Tamaño de ventana para métrica CV local (impar recomendado)."),
+    window_size: int = Query(13, ge=1, le=101, description="Fast: lado impar de ventana. Mat.: parámetro ws de CV.m."),
+    cv_engine: str = Query("fast", description="fast (sumas en caja, ventana lado impar) | matlab (CV.m nonzeros)."),
+    roi_polygon: str | None = Query(
+        None,
+        description='Opcional: JSON [[col,row],...] en pixeles del raster (mismo sistema que la vista previa DEM).',
+    ),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
@@ -1075,29 +1746,298 @@ def get_soilplus_dem_input_stats(
     project = require_project_dashboard_access(db, user, tenant_id, project_id)
 
     try:
-        dem_path, arr, mask = _load_soilplus_dem_band1(project_id, tenant_id)
+        dem_path, arr, mask, transform = _load_soilplus_dem_band1(project_id, tenant_id)
+        verts = _soilplus_parse_roi_polygon(roi_polygon)
+        eff = _soilplus_effective_roi_mask(arr, mask, verts)
         n_valid = int(np.count_nonzero(mask))
+        n_roi = int(np.count_nonzero(eff))
         vals = arr[mask]
-        cv_w, cv_vals, ws = _soilplus_compute_cv(arr, mask, window_size)
+        vals_roi = arr[eff] if n_roi else np.array([], dtype=np.float64)
+        stats_mask = eff if verts is not None else None
+        _cv_map, cv_for_stats, _ws_use, cv_run_meta = _soilplus_compute_cv_dispatch(
+            arr, mask, window_size, stats_mask=stats_mask, cv_engine=cv_engine
+        )
+        area_m2 = _soilplus_roi_planar_area_m2(verts, mask, transform)
+        area_ha = area_m2 / 10000.0
+        suggested_snc = max(1, int(round(area_ha))) if area_ha > 0 else 60
         return {
             "project_id": int(project_id),
             "input_image_path": str(dem_path),
-            "window_size": ws,
+            "window_size": int(window_size),
+            "cv_run": cv_run_meta,
             "width": int(arr.shape[1]),
             "height": int(arr.shape[0]),
             "valid_pixel_count": n_valid,
+            "roi_pixel_count": n_roi,
+            "roi_polygon_applied": bool(verts is not None),
+            "polygon_area_m2": float(area_m2),
+            "polygon_area_ha": float(area_ha),
+            "suggested_sample_count": int(suggested_snc),
             "dem_mean": float(np.mean(vals)),
             "dem_std": float(np.std(vals)),
             "dem_min": float(np.min(vals)),
             "dem_max": float(np.max(vals)),
-            "cv_mean": float(np.mean(cv_vals)) if cv_vals.size else 0.0,
-            "cv_var": float(np.var(cv_vals)) if cv_vals.size else 0.0,
+            "dem_roi_mean": float(np.mean(vals_roi)) if vals_roi.size else 0.0,
+            "dem_roi_std": float(np.std(vals_roi)) if vals_roi.size else 0.0,
+            "cv_mean": float(np.mean(cv_for_stats)) if cv_for_stats.size else 0.0,
+            "cv_var": float(np.var(cv_for_stats)) if cv_for_stats.size else 0.0,
             "method": "band1_dem_values_cleaned_negatives_to_zero_mask_gt_zero",
         }
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"No se pudo leer DEM de entrada: {exc}") from exc
+
+
+@router.get("/preprocess/soilplus-f123-terrain/{project_id}")
+def get_soilplus_f123_terrain(
+    project_id: int,
+    roi_polygon: str | None = Query(
+        None,
+        description="JSON [[col,row],...] del polígono cerrado; omitir para usar toda la máscara DEM (>0).",
+    ),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """
+    Covariables de terreno sobre el DEM en la ROI: f1 elevación, f2 aspecto, f3 pendiente (medias de valores 0–1
+    normalizados por min–max en la ROI, útiles como pesos auxiliares).
+    """
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
+    _path, arr, mask, transform = _load_soilplus_dem_band1(project_id, tenant_id)
+    verts = _soilplus_parse_roi_polygon(roi_polygon)
+    eff = _soilplus_effective_roi_mask(arr, mask, verts)
+    if int(np.count_nonzero(eff)) <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="ROI vacía: define un polígono válido sobre el DEM o omite roi_polygon para usar toda la máscara.",
+        )
+    stats = _soilplus_f123_from_roi_dem(arr, mask, eff, transform)
+    return {
+        "project_id": int(project_id),
+        "roi_polygon_applied": bool(verts is not None),
+        "roi_pixel_count": int(np.count_nonzero(eff)),
+        **stats,
+        "method": "dem_roi_f1_aspect_f2_slope_f3_minmax_mean",
+    }
+
+
+@router.get("/preprocess/soilplus-sampling-plan/{project_id}")
+def get_soilplus_sampling_plan(
+    project_id: int,
+    window_size: int = Query(13, ge=1, le=101),
+    cv_engine: str = Query("fast", description="fast | matlab (CV.m)"),
+    n_clusters: int = Query(4, ge=2, le=30),
+    fishnet_step: int = Query(
+        5,
+        ge=1,
+        le=80,
+        description="Paso de la rejilla fishNet para candidatos (equivalente a w en el flujo de referencia).",
+    ),
+    roi_polygon: str | None = Query(
+        None,
+        description="JSON [[col,row],...] polígono cerrado; omitir = máscara DEM válida completa.",
+    ),
+    total_samples: int | None = Query(
+        None,
+        ge=1,
+        le=500000,
+        description="Total de muestras; si se omite se usa max(1, round(área del ROI en ha)).",
+    ),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """
+    FCM sobre CV normalizado en la ROI, reparto SN por zonas (DEM), y puntos finales vía
+    rejilla fishNet + FCM 2D (DEM, aspecto) y selección greedy por pertenencias.
+    """
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
+    _, arr, mask, transform = _load_soilplus_dem_band1(project_id, tenant_id)
+    verts = _soilplus_parse_roi_polygon(roi_polygon)
+    eff = _soilplus_effective_roi_mask(arr, mask, verts)
+    if int(np.count_nonzero(eff)) <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="ROI vacía: define un polígono o omite roi_polygon para usar toda la máscara DEM.",
+        )
+    area_m2 = _soilplus_roi_planar_area_m2(verts, mask, transform)
+    area_ha = area_m2 / 10000.0
+    inferred = total_samples is None
+    if total_samples is not None:
+        snc = int(total_samples)
+    else:
+        snc = max(1, int(round(area_ha))) if area_ha > 0 else 60
+    stats_mask = eff if verts is not None else None
+    cv_w, _, _wu, cv_run_meta = _soilplus_compute_cv_dispatch(
+        arr, mask, window_size, stats_mask=stats_mask, cv_engine=cv_engine
+    )
+    lab_map = _soilplus_fcm_labels_from_cv_norm(cv_w, eff, int(n_clusters), m=2.0)
+    alloc, snh, pix_c = _soilplus_allocate_samples_per_cluster_dem(
+        arr, lab_map, eff, int(n_clusters), snc
+    )
+    aspect_deg, _slope_unused = _soilplus_aspect_slope_deg(arr, mask, transform)
+    sample_points = _soilplus_sample_points_hoya_rs(
+        arr,
+        aspect_deg,
+        lab_map,
+        eff,
+        alloc,
+        int(fishnet_step),
+        m=2.0,
+        seed=42,
+    )
+    nk = int(n_clusters)
+    actual = np.zeros(nk, dtype=np.int64)
+    for pt in sample_points:
+        cid = int(pt.get("cluster", -1))
+        if 0 <= cid < nk:
+            actual[cid] += 1
+    placed = int(actual.sum())
+    return {
+        "project_id": int(project_id),
+        "window_size": int(window_size),
+        "cv_run": cv_run_meta,
+        "n_clusters": int(n_clusters),
+        "fishnet_step": int(fishnet_step),
+        "roi_polygon_applied": bool(verts is not None),
+        "roi_pixel_count": int(np.count_nonzero(eff)),
+        "polygon_area_m2": float(area_m2),
+        "polygon_area_ha": float(area_ha),
+        "total_samples": int(snc),
+        "total_samples_placed": placed,
+        "total_samples_inferred": inferred,
+        "samples_requested_per_cluster": [int(x) for x in alloc],
+        "samples_per_cluster": [int(x) for x in actual],
+        "pixels_per_cluster": pix_c,
+        "dem_weight_per_cluster": [float(x) for x in snh],
+        "raster_shape": {"height": int(arr.shape[0]), "width": int(arr.shape[1])},
+        "sample_points": sample_points,
+    }
+
+
+@router.post("/preprocess/soilplus-execute-save/{project_id}")
+def post_soilplus_execute_save(
+    project_id: int,
+    window_size: int = Query(13, ge=1, le=101),
+    cv_engine: str = Query("fast", description="fast | matlab"),
+    n_clusters: int = Query(4, ge=2, le=30),
+    fishnet_step: int = Query(5, ge=1, le=80),
+    roi_polygon: str | None = Query(
+        None,
+        description="JSON [[col,row],...] polígono; omitir = máscara DEM completa.",
+    ),
+    total_samples: int | None = Query(
+        None,
+        ge=1,
+        le=500000,
+        description="Total muestras; omitir → heurística por há del ROI.",
+    ),
+    cmap: str = Query("jet"),
+    m: float = Query(2.0, ge=1.05, le=10.0),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """
+    Ejecuta Soil+ (CV+Fcm+muestreo+Q como en la agrupación de vistas previas),
+    guarda JSON y PNG bajo ``dem/soilplus_saved_{fast|matlab}``.
+    """
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
+    bundle = _soilplus_execute_save_bundle(
+        project_id,
+        tenant_id,
+        window_size=window_size,
+        cv_engine=cv_engine,
+        n_clusters=int(n_clusters),
+        fishnet_step=int(fishnet_step),
+        roi_polygon=roi_polygon,
+        total_samples=total_samples,
+        cmap=cmap,
+        m=float(m),
+    )
+    return {"saved": True, **bundle}
+
+
+@router.get("/preprocess/soilplus-saved-summary/{project_id}")
+def get_soilplus_saved_summary(
+    project_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """Índices ligeros de ejecuciones guardadas Fast / Mat por proyecto."""
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
+    root = _tenant_storage(tenant_id, project_id, "dem")
+    out: dict[str, dict[str, object] | None] = {}
+    for slug in ("fast", "matlab"):
+        jp = root / f"soilplus_saved_{slug}.json"
+        if not jp.is_file():
+            out[slug] = None
+            continue
+        try:
+            data = json.loads(jp.read_text(encoding="utf-8"))
+        except Exception:
+            out[slug] = {"error": "bad_json"}
+            continue
+        out[slug] = {
+            "saved_at": data.get("saved_at"),
+            "cv_run": data.get("cv_run"),
+            "window_size": data.get("window_size"),
+            "n_clusters": data.get("n_clusters"),
+            "total_samples": data.get("total_samples"),
+            "total_samples_placed": data.get("total_samples_placed"),
+            "fishnet_step": data.get("fishnet_step"),
+        }
+    return {"project_id": int(project_id), "variants": out}
+
+
+@router.get("/preprocess/soilplus-saved-json/{project_id}")
+def get_soilplus_saved_json(
+    project_id: int,
+    variant: str = Query("fast", description="fast | matlab"),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """Payload JSON persistido para hidratar el dashboard cliente."""
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
+    vk = variant.strip().lower()
+    if vk not in ("fast", "matlab"):
+        raise HTTPException(status_code=400, detail="variant debe ser fast o matlab")
+    jp = _tenant_storage(tenant_id, project_id, "dem") / f"soilplus_saved_{vk}.json"
+    if not jp.is_file():
+        raise HTTPException(status_code=404, detail="No hay Soil+ guardado para esta variante")
+    try:
+        return json.loads(jp.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"JSON ilegible: {exc}") from exc
+
+
+@router.get("/preprocess/soilplus-saved-img/{project_id}")
+def get_soilplus_saved_img(
+    project_id: int,
+    variant: str = Query("fast", description="fast | matlab"),
+    kind: str = Query(
+        "dem",
+        description="dem | cv | fcm | aspect | slope",
+    ),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
+    vk = variant.strip().lower()
+    if vk not in ("fast", "matlab"):
+        raise HTTPException(status_code=400, detail="variant debe ser fast o matlab")
+    kd = kind.strip().lower()
+    if kd not in ("dem", "cv", "fcm", "aspect", "slope"):
+        raise HTTPException(status_code=400, detail="kind no soportado")
+    path_png = _tenant_storage(tenant_id, project_id, "dem") / f"soilplus_saved_{vk}_{kd}.png"
+    if not path_png.is_file():
+        raise HTTPException(status_code=404, detail="Imagen guardada no encontrada")
+    return FileResponse(path_png, media_type="image/png")
 
 
 @router.get("/preprocess/soilplus-dem-preview/{project_id}")
@@ -1108,7 +2048,7 @@ def get_soilplus_dem_preview(
     tenant_id: int = Depends(tenant_from_jwt),
 ):
     project = require_project_dashboard_access(db, user, tenant_id, project_id)
-    dem_path, arr, mask = _load_soilplus_dem_band1(project_id, tenant_id)
+    dem_path, arr, mask, _ = _load_soilplus_dem_band1(project_id, tenant_id)
     _ = dem_path
     png = _soilplus_png_from_array(arr, mask)
     return Response(content=png, media_type="image/png")
@@ -1117,15 +2057,316 @@ def get_soilplus_dem_preview(
 @router.get("/preprocess/soilplus-cv-preview/{project_id}")
 def get_soilplus_cv_preview(
     project_id: int,
-    window_size: int = Query(13, ge=3, le=101),
+    window_size: int = Query(13, ge=1, le=101),
+    cv_engine: str = Query("fast", description="fast | matlab (CV.m)"),
+    roi_polygon: str | None = Query(
+        None,
+        description='Opcional: JSON [[col,row],...] pixeles; CV coloreado solo dentro del polígono.',
+    ),
+    cmap: str = Query("jet", description="Paleta matplotlib: jet, spectral, turbo, viridis, ..."),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
     tenant_id: int = Depends(tenant_from_jwt),
 ):
     project = require_project_dashboard_access(db, user, tenant_id, project_id)
-    _, arr, mask = _load_soilplus_dem_band1(project_id, tenant_id)
-    cv_w, _, _ws = _soilplus_compute_cv(arr, mask, window_size)
-    png = _soilplus_png_from_array(cv_w, mask)
+    _, arr, mask, _ = _load_soilplus_dem_band1(project_id, tenant_id)
+    verts = _soilplus_parse_roi_polygon(roi_polygon)
+    eff = _soilplus_effective_roi_mask(arr, mask, verts)
+    if int(np.count_nonzero(eff)) <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="ROI vacia: dibuja un polígono dentro del DEM valido o deja roi_polygon vacio.",
+        )
+    cmap_id = _soilplus_resolve_cv_colormap(cmap)
+    stats_mask = eff if verts is not None else None
+    cv_w, _, _ws_ignore, _meta = _soilplus_compute_cv_dispatch(
+        arr, mask, window_size, stats_mask=stats_mask, cv_engine=cv_engine
+    )
+    png = _soilplus_png_cv_colormap(cv_w, eff, cmap_id)
+    return Response(content=png, media_type="image/png")
+
+
+@router.get("/preprocess/soilplus-aspect-preview/{project_id}")
+def get_soilplus_aspect_preview(
+    project_id: int,
+    roi_polygon: str | None = Query(
+        None,
+        description="Opcional: JSON [[col,row],...]; mismo ROI que CV.",
+    ),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
+    _, arr, mask, transform = _load_soilplus_dem_band1(project_id, tenant_id)
+    verts = _soilplus_parse_roi_polygon(roi_polygon)
+    eff = _soilplus_effective_roi_mask(arr, mask, verts)
+    if int(np.count_nonzero(eff)) <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="ROI vacía: define un polígono o omite roi_polygon para usar toda la máscara DEM.",
+        )
+    aspect_deg, _slope = _soilplus_aspect_slope_deg(arr, mask, transform)
+    png = _soilplus_png_aspect_masked(aspect_deg, eff)
+    return Response(content=png, media_type="image/png")
+
+
+@router.get("/preprocess/soilplus-slope-preview/{project_id}")
+def get_soilplus_slope_preview(
+    project_id: int,
+    roi_polygon: str | None = Query(
+        None,
+        description="Opcional: JSON [[col,row],...]; mismo ROI que CV.",
+    ),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
+    _, arr, mask, transform = _load_soilplus_dem_band1(project_id, tenant_id)
+    verts = _soilplus_parse_roi_polygon(roi_polygon)
+    eff = _soilplus_effective_roi_mask(arr, mask, verts)
+    if int(np.count_nonzero(eff)) <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="ROI vacía: define un polígono o omite roi_polygon para usar toda la máscara DEM.",
+        )
+    _aspect, slope_deg = _soilplus_aspect_slope_deg(arr, mask, transform)
+    png = _soilplus_png_slope_masked(slope_deg, eff)
+    return Response(content=png, media_type="image/png")
+
+
+def _soilplus_qcomp_from_cv_flat(
+    cv_flat: np.ndarray,
+    n_clusters: int,
+    *,
+    m: float = 2.0,
+    seed: int = 42,
+) -> float:
+    """
+    Estadístico Q tras FCM sobre el vector CV (valores en ROI): Q = 1 - sum_k n_k var_k / (N var_total),
+    con varianza muestral (ddof=1), alineado con el flujo típico de selección de K.
+    """
+    try:
+        import skfuzzy as fuzz
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Falta la dependencia scikit-fuzzy en el servidor. "
+                "En Docker: docker compose exec backend pip install scikit-fuzzy==0.4.2 "
+                "o reinicia el backend (pip install -r requirements.txt al arrancar). "
+                f"Detalle: {exc}"
+            ),
+        ) from exc
+
+    cv_flat = np.asarray(cv_flat, dtype=np.float64).ravel()
+    if not np.all(np.isfinite(cv_flat)):
+        cv_flat = np.nan_to_num(cv_flat, nan=0.0, posinf=0.0, neginf=0.0)
+    n_pix = int(cv_flat.size)
+    c = int(n_clusters)
+    if n_pix < c or c < 2:
+        return float("nan")
+
+    def _var_sample(z: np.ndarray) -> float:
+        if z.size <= 1:
+            return 0.0
+        return float(np.var(z, ddof=1))
+
+    nt = float(n_pix) * _var_sample(cv_flat)
+    if nt <= 1e-18:
+        return float("nan")
+
+    x = cv_flat.reshape(1, -1)
+    try:
+        _cntr, u, _u0, _d, _jm, _p, _fpc = fuzz.cluster.cmeans(
+            x,
+            c=c,
+            m=float(m),
+            error=0.005,
+            maxiter=1000,
+            init=None,
+            seed=int(seed),
+        )
+    except Exception:
+        logger.warning("Q-comp: FCM no convergió o falló para K=%s", c)
+        return float("nan")
+
+    labels = np.argmax(u, axis=0)
+    nv_sum = 0.0
+    for ss in range(c):
+        sec = cv_flat[labels == ss]
+        if sec.size == 0:
+            continue
+        nv_sum += float(sec.size) * _var_sample(sec)
+
+    return float(1.0 - nv_sum / nt)
+
+
+@router.get("/preprocess/soilplus-q-curve/{project_id}")
+def get_soilplus_q_curve(
+    project_id: int,
+    window_size: int = Query(13, ge=1, le=101),
+    cv_engine: str = Query("fast", description="fast | matlab (CV.m)"),
+    k_min: int = Query(2, ge=2, le=30),
+    k_max: int = Query(11, ge=2, le=30),
+    roi_polygon: str | None = Query(
+        None,
+        description="JSON [[col,row],...]; omitir = máscara DEM completa.",
+    ),
+    m: float = Query(2.0, ge=1.05, le=10.0),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """
+    Curva Q(K): para cada K se ejecuta FCM sobre CV(ROI) y se calcula Q = 1 - sum_k n_k var_k / (N var_total).
+    """
+    if k_max < k_min:
+        raise HTTPException(status_code=400, detail="k_max debe ser >= k_min")
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
+    _, arr, mask, _ = _load_soilplus_dem_band1(project_id, tenant_id)
+    verts = _soilplus_parse_roi_polygon(roi_polygon)
+    eff = _soilplus_effective_roi_mask(arr, mask, verts)
+    if int(np.count_nonzero(eff)) <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="ROI vacía: define un polígono o omite roi_polygon para usar toda la máscara DEM.",
+        )
+    stats_mask = eff if verts is not None else None
+    cv_w, _, _wu, cv_run_meta = _soilplus_compute_cv_dispatch(
+        arr, mask, window_size, stats_mask=stats_mask, cv_engine=cv_engine
+    )
+    rc_cm = _soilplus_eff_pixel_rc_column_major(eff)
+    cv_flat = cv_w[rc_cm[:, 0], rc_cm[:, 1]].astype(np.float64)
+    if not np.all(np.isfinite(cv_flat)):
+        cv_flat = np.nan_to_num(cv_flat, nan=0.0, posinf=0.0, neginf=0.0)
+    vmax = float(np.max(cv_flat))
+    if vmax > 1e-12:
+        cv_flat = cv_flat / vmax
+
+    ks: list[int] = []
+    q_list: list[float | None] = []
+    for k in range(int(k_min), int(k_max) + 1):
+        ks.append(int(k))
+        qv = _soilplus_qcomp_from_cv_flat(cv_flat, k, m=float(m), seed=42)
+        if not np.isfinite(qv):
+            q_list.append(None)
+        else:
+            q_list.append(float(qv))
+
+    return {
+        "project_id": int(project_id),
+        "window_size": int(window_size),
+        "cv_run": cv_run_meta,
+        "m": float(m),
+        "k_values": ks,
+        "q_values": q_list,
+    }
+
+
+def _soilplus_fcm_labels_from_cv_norm(
+    cv_w: np.ndarray,
+    eff: np.ndarray,
+    n_clusters: int,
+    *,
+    m: float = 2.0,
+) -> np.ndarray:
+    """
+    FCM sobre valores de CV en la ROI, normalizados por max(CV) en la ROI.
+
+    Mismo orden column-major sobre la ROI que la curva Q y ``_soilplus_sample_points_hoya_rs``
+    (`I(mask)` en MATLAB). Usar orden fila-major (np.where) cambia las columnas de entrada
+    a ``cmeans`` y con semilla aleatoria altera las particiones respecto al flujo de referencia.
+    """
+    try:
+        import skfuzzy as fuzz
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Falta la dependencia scikit-fuzzy en el servidor. "
+                "En Docker: docker compose exec backend pip install scikit-fuzzy==0.4.2 "
+                "o reinicia el backend (pip install -r requirements.txt al arrancar). "
+                f"Detalle: {exc}"
+            ),
+        ) from exc
+
+    rc_cm = _soilplus_eff_pixel_rc_column_major(eff)
+    if rc_cm.size == 0:
+        raise HTTPException(status_code=400, detail="ROI vacía; FCM no aplicable.")
+    rs, cs = rc_cm[:, 0], rc_cm[:, 1]
+    vals = cv_w[rs, cs].astype(np.float64)
+    if not np.all(np.isfinite(vals)):
+        vals = np.nan_to_num(vals, nan=0.0, posinf=0.0, neginf=0.0)
+    n_pix = int(vals.size)
+    c = int(n_clusters)
+    if n_pix < c:
+        raise HTTPException(
+            status_code=400,
+            detail=f"ROI con {n_pix} píxeles: se necesitan al menos K={c} para FCM.",
+        )
+    vmax = float(np.max(vals))
+    if vmax <= 1e-12:
+        raise HTTPException(status_code=400, detail="CV nulo o constante en la ROI; FCM no aplicable.")
+    x = (vals / vmax).reshape(1, -1)
+    try:
+        _cntr, u, _u0, _d, _jm, _p, _fpc = fuzz.cluster.cmeans(
+            x,
+            c=c,
+            m=float(m),
+            error=0.005,
+            maxiter=1000,
+            init=None,
+            seed=42,
+        )
+    except Exception as exc:
+        logger.exception("FCM (skfuzzy.cmeans) falló")
+        raise HTTPException(
+            status_code=400,
+            detail=f"FCM no convergió o datos inválidos: {exc}",
+        ) from exc
+    ord = np.argsort(_cntr.ravel())
+    u_ord = u[ord, :]
+    labels_flat = np.argmax(u_ord, axis=0).astype(np.int16)
+    lab_map = np.full(cv_w.shape, -1, dtype=np.int16)
+    lab_map[rs, cs] = labels_flat
+    return lab_map
+
+
+@router.get("/preprocess/soilplus-fcm-cv-preview/{project_id}")
+def get_soilplus_fcm_cv_preview(
+    project_id: int,
+    window_size: int = Query(13, ge=1, le=101),
+    cv_engine: str = Query("fast", description="fast | matlab (CV.m)"),
+    n_clusters: int = Query(4, ge=2, le=30),
+    roi_polygon: str | None = Query(
+        None,
+        description="Opcional: JSON [[col,row],...]; mismo ROI que CV.",
+    ),
+    m: float = Query(2.0, ge=1.05, le=10.0, description="Exponente de fuzziness FCM (típico 2)."),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """
+    Vista raster: FCM (fuzzy c-means) sobre el mapa CV normalizado en la ROI / máscara DEM.
+    """
+    project = require_project_dashboard_access(db, user, tenant_id, project_id)
+    _, arr, mask, _ = _load_soilplus_dem_band1(project_id, tenant_id)
+    verts = _soilplus_parse_roi_polygon(roi_polygon)
+    eff = _soilplus_effective_roi_mask(arr, mask, verts)
+    if int(np.count_nonzero(eff)) <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="ROI vacía: define un polígono en el DEM o deja roi_polygon vacío para usar toda la máscara.",
+        )
+    stats_mask = eff if verts is not None else None
+    cv_w, _, _wu, _meta = _soilplus_compute_cv_dispatch(
+        arr, mask, window_size, stats_mask=stats_mask, cv_engine=cv_engine
+    )
+    lab_map = _soilplus_fcm_labels_from_cv_norm(cv_w, eff, int(n_clusters), m=m)
+    png = _soilplus_cluster_png(lab_map, eff, int(n_clusters))
     return Response(content=png, media_type="image/png")
 
 
@@ -1142,7 +2383,7 @@ def get_soilplus_elbow(
     project = require_project_dashboard_access(db, user, tenant_id, project_id)
     if k_max < k_min:
         raise HTTPException(status_code=400, detail="k_max debe ser >= k_min")
-    _, arr, mask = _load_soilplus_dem_band1(project_id, tenant_id)
+    _, arr, mask, _ = _load_soilplus_dem_band1(project_id, tenant_id)
     x = arr[mask].reshape(-1, 1).astype(np.float64)
     n = x.shape[0]
     if n > sample_max:
@@ -1189,7 +2430,7 @@ def get_soilplus_cluster_preview(
     tenant_id: int = Depends(tenant_from_jwt),
 ):
     project = require_project_dashboard_access(db, user, tenant_id, project_id)
-    _, arr, mask = _load_soilplus_dem_band1(project_id, tenant_id)
+    _, arr, mask, _ = _load_soilplus_dem_band1(project_id, tenant_id)
     x = arr[mask].reshape(-1, 1).astype(np.float64)
     n = x.shape[0]
     if n > sample_max:
@@ -2469,6 +3710,12 @@ def ps_spatiotemporal_cluster_status(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     out_dir = _tenant_storage(tenant_id, project_id, pr.output_subdir)
+    if not out_dir.is_dir():
+        for legacy_subdir in pr.legacy_output_subdirs:
+            legacy_dir = _tenant_storage(tenant_id, project_id, legacy_subdir)
+            if legacy_dir.is_dir():
+                out_dir = legacy_dir
+                break
     map_path = out_dir / "final_cluster_map.tif"
     return {
         "ready": map_path.is_file(),
@@ -2491,7 +3738,14 @@ def ps_spatiotemporal_cluster_preview(
         pr = get_preset(preset)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    map_path = _tenant_storage(tenant_id, project_id, pr.output_subdir) / "final_cluster_map.tif"
+    out_dir = _tenant_storage(tenant_id, project_id, pr.output_subdir)
+    map_path = out_dir / "final_cluster_map.tif"
+    if not map_path.is_file():
+        for legacy_subdir in pr.legacy_output_subdirs:
+            legacy_map_path = _tenant_storage(tenant_id, project_id, legacy_subdir) / "final_cluster_map.tif"
+            if legacy_map_path.is_file():
+                map_path = legacy_map_path
+                break
     if not map_path.is_file():
         raise HTTPException(status_code=404, detail="Aún no hay mapa de cluster. Ejecuta POST ps-spatiotemporal-cluster.")
     try:

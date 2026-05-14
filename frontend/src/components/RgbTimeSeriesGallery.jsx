@@ -29,6 +29,15 @@ function filterGalleryRasters(rows) {
   });
 }
 
+/**
+ * Variante Sentinel-2 (pestaña S2 / galería con pipelineVariant s2): no mezclar recortes GRD
+ * Sentinel-1; comparten etiqueta ``dd/mm/aaaa_clip`` vía ``formatRecorteDisplayName`` y el preview RGB
+ * puede salir en negro.
+ */
+function filterGalleryRastersS2Pipeline(rows) {
+  return filterGalleryRasters(rows).filter((r) => !r.metadata?.s1_grd_recorte);
+}
+
 /** Solo recortes GRD IW VV+VH (pestaña SI). */
 function filterS1GrdRecortes(rows) {
   return rows.filter((r) => {
@@ -96,22 +105,88 @@ const RECORTE_PREVIEW_PLACEHOLDER =
     '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="150"><rect fill="#2a2a2a" width="100%" height="100%"/><text x="50%" y="50%" fill="#999" font-size="12" text-anchor="middle" font-family="system-ui,sans-serif">Sin vista previa</text></svg>'
   );
 
+/** Clave estable YYYY-MM-DD para no duplicar miniaturas por la misma fecha en un stack. */
+function _bandDateKeyForDedupe(d) {
+  if (typeof d === "string" && d.length >= 10) return d.slice(0, 10);
+  return null;
+}
+
+/**
+ * Una miniatura por fecha distinta en el stack (evita band_dates repetidos o filas duplicadas en inventario).
+ * Conserva la primera banda asociada a cada fecha.
+ */
+function specsUniqueByBandDate(nb, dates) {
+  const specs = [];
+  const seenDate = new Set();
+  const seenFallback = new Set();
+  const n = Number(nb);
+  if (!Number.isFinite(n) || n < 1) {
+    return [{ band: 1, labelSuffix: "" }];
+  }
+  for (let i = 0; i < n; i++) {
+    const d = Array.isArray(dates) ? dates[i] : undefined;
+    const dk = _bandDateKeyForDedupe(d);
+    let labelSuffix;
+    if (dk) {
+      labelSuffix = formatIsoDateDdMmYyyy(dk);
+      if (seenDate.has(dk)) continue;
+      seenDate.add(dk);
+    } else {
+      labelSuffix = `banda ${i + 1}`;
+      if (seenFallback.has(labelSuffix)) continue;
+      seenFallback.add(labelSuffix);
+    }
+    specs.push({ band: i + 1, labelSuffix });
+  }
+  return specs.length ? specs : [{ band: 1, labelSuffix: "" }];
+}
+
+/** Quita entradas de inventario con la misma ruta (p. ej. duplicados por casing o escaneo). */
+function dedupeIndexInventoryRows(rows) {
+  const seen = new Set();
+  const out = [];
+  for (const row of rows) {
+    const k = String(row.relative_path || "").replace(/\\/g, "/").toLowerCase();
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    out.push(row);
+  }
+  return out;
+}
+
+/** ``NDVI · 05/10/2025`` → ``2025-10-05`` para orden y deduplicación entre varios stacks en disco. */
+function isoDateFromIndexGalleryLabel(label) {
+  const m = String(label || "").match(/(\d{2})\/(\d{2})\/(\d{4})/);
+  if (!m) return null;
+  const [, dd, mo, yyyy] = m;
+  return `${yyyy}-${mo}-${dd}`;
+}
+
+/**
+ * Una miniatura por fecha de escena: bajo ``indices/<INDICE>/`` pueden existir varios .tif con las mismas
+ * fechas en ``band_dates`` (p. ej. corridas duplicadas del pipeline). Orden cronológico por fecha.
+ */
+function dedupeAndSortIndexGalleryItems(items) {
+  const byKey = new Map();
+  for (const it of items) {
+    const lab = String(it.label || "").trim();
+    const iso = isoDateFromIndexGalleryLabel(lab);
+    const key = iso || lab;
+    if (!byKey.has(key)) byKey.set(key, it);
+  }
+  return [...byKey.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([, v]) => v);
+}
+
 /** Miniaturas a pedir: una por banda/fecha en stacks de índice; una por capa en RGB. */
 function previewSpecsForRaster(r) {
   const m = r.metadata || {};
   const n = m.index_stack_band_count;
   const dates = m.index_band_dates;
   if (m.s2_index_stack && typeof n === "number" && n >= 1 && Array.isArray(dates) && dates.length >= n) {
-    return Array.from({ length: n }, (_, i) => ({
-      band: i + 1,
-      labelSuffix: formatIsoDateDdMmYyyy(dates[i]),
-    }));
+    return specsUniqueByBandDate(n, dates);
   }
   if (m.s2_index_stack && typeof n === "number" && n >= 1) {
-    return Array.from({ length: n }, (_, i) => ({
-      band: i + 1,
-      labelSuffix: `banda ${i + 1}`,
-    }));
+    return specsUniqueByBandDate(n, []);
   }
   return [{ band: null, labelSuffix: null }];
 }
@@ -430,22 +505,12 @@ export default function RgbTimeSeriesGallery({
           const allRows = invRes.data?.items || [];
           const normIdx = (k) => String(k || "").toUpperCase();
           const ak = normIdx(activeIndexKey);
-          const rows = allRows.filter((row) => normIdx(row.index_key) === ak);
+          const rows = dedupeIndexInventoryRows(allRows.filter((row) => normIdx(row.index_key) === ak));
           for (const row of rows) {
             if (cancelled) break;
             const nb = Number(row.bands);
             const dates = Array.isArray(row.band_dates) ? row.band_dates : [];
-            const specs =
-              Number.isFinite(nb) && nb >= 1
-                ? Array.from({ length: nb }, (_, i) => {
-                    const d = dates[i];
-                    let labelSuffix = `banda ${i + 1}`;
-                    if (typeof d === "string" && d.length >= 10) {
-                      labelSuffix = formatIsoDateDdMmYyyy(d.slice(0, 10));
-                    }
-                    return { band: i + 1, labelSuffix };
-                  })
-                : [{ band: 1, labelSuffix: "" }];
+            const specs = specsUniqueByBandDate(nb, dates);
             const idxName = row.index_key || activeIndexKey || "";
             for (const spec of specs) {
               if (cancelled) break;
@@ -490,22 +555,12 @@ export default function RgbTimeSeriesGallery({
             ? activeIndexKey
             : "RVI";
           const ak = normIdx(sarActiveKey);
-          const rows = allRows.filter((row) => normIdx(row.index_key) === ak);
+          const rows = dedupeIndexInventoryRows(allRows.filter((row) => normIdx(row.index_key) === ak));
           for (const row of rows) {
             if (cancelled) break;
             const nb = Number(row.bands);
             const dates = Array.isArray(row.band_dates) ? row.band_dates : [];
-            const specs =
-              Number.isFinite(nb) && nb >= 1
-                ? Array.from({ length: nb }, (_, i) => {
-                    const d = dates[i];
-                    let labelSuffix = `banda ${i + 1}`;
-                    if (typeof d === "string" && d.length >= 10) {
-                      labelSuffix = formatIsoDateDdMmYyyy(d.slice(0, 10));
-                    }
-                    return { band: i + 1, labelSuffix };
-                  })
-                : [{ band: 1, labelSuffix: "" }];
+            const specs = specsUniqueByBandDate(nb, dates);
             const idxName = labelS1SarIndexTab(row.index_key || sarActiveKey || "");
             for (const spec of specs) {
               if (cancelled) break;
@@ -677,6 +732,8 @@ export default function RgbTimeSeriesGallery({
           let rows;
           if (indexMode) {
             rows = filterSixBandStackRasters(raw);
+          } else if (pipelineVariant === "s2") {
+            rows = filterGalleryRastersS2Pipeline(raw);
           } else {
             rows = filterGalleryRasters(raw);
           }
@@ -733,7 +790,14 @@ export default function RgbTimeSeriesGallery({
           }
         }
 
-        if (!cancelled) setItems(loaded);
+        let galleryItems = loaded;
+        if (
+          mode === "view" &&
+          (galleryVisualMode === "index" || galleryVisualMode === "s1-sar-index")
+        ) {
+          galleryItems = dedupeAndSortIndexGalleryItems(loaded);
+        }
+        if (!cancelled) setItems(galleryItems);
       } catch (e) {
         if (!cancelled) {
           setError(formatApiErrorDetail(e) || "Error al cargar capas");
@@ -934,7 +998,7 @@ export default function RgbTimeSeriesGallery({
             ? "Visual índices SAR — serie temporal"
             : "Visual índices — serie temporal"
           : mode === "view" && galleryVisualMode === "s1-vv"
-            ? "Visual VV — serie temporal"
+            ? "Visual VV/VH — serie temporal"
             : mode === "view" && galleryVisualMode === "s1-vh"
               ? "Visual VH — serie temporal"
               : mode === "view" && galleryVisualMode === "s1-index"

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import api, { API_URL, formatApiErrorDetail, loadStoredAuth, setAuthToken } from "../../api";
 import SensorTimelapseViewer from "./SensorTimelapseViewer";
+import DemRoiEditor, { defaultRoi, soilRoiToQueryParam } from "./DemRoiEditor";
 import VegetationTimeSeriesCharts from "../VegetationTimeSeriesCharts";
 import ClimateTimeSeriesChart from "./ClimateTimeSeriesChart";
 
@@ -136,56 +137,206 @@ function safeRevokePreviewUrl(url) {
   URL.revokeObjectURL(url);
 }
 
-async function computeImageMeanGray(src) {
-  if (!src) return null;
-  const img = new Image();
-  img.decoding = "async";
-  img.crossOrigin = "anonymous";
-  img.src = src;
-  await img.decode();
-  const canvas = document.createElement("canvas");
-  canvas.width = img.naturalWidth || img.width || 1;
-  canvas.height = img.naturalHeight || img.height || 1;
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  if (!ctx) return null;
-  ctx.drawImage(img, 0, 0);
-  const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  if (!data?.length) return null;
-  let sum = 0;
-  let count = 0;
-  for (let i = 0; i < data.length; i += 4) {
-    const alpha = data[i + 3];
-    if (alpha === 0) continue;
-    const gray = (data[i] + data[i + 1] + data[i + 2]) / 3;
-    sum += gray;
-    count += 1;
+const SOIL_CLUSTER_BAR_COLORS = [
+  "#e41a1c",
+  "#377eb8",
+  "#4daf4a",
+  "#984ea3",
+  "#ff7f00",
+  "#ffff33",
+  "#a65628",
+  "#f781bf",
+];
+
+function SoilClusterSampleBars({ samples, totalSamples, clusterCount, compact = false, thumb = false }) {
+  const arr = Array.isArray(samples) ? samples : [];
+  const k = Math.max(1, Number(clusterCount) || arr.length || 1);
+  const total = Math.max(1, Number(totalSamples) || 1);
+  let barW;
+  let gap;
+  let svgW;
+  let maxH;
+  let baseY;
+  let svgH;
+  let fs;
+  let labelY;
+  let rx;
+  let minBar;
+  if (thumb) {
+    barW = Math.min(22, Math.floor(165 / Math.max(k, 1)));
+    gap = 4;
+    svgW = Math.min(260, 14 + k * (barW + gap));
+    maxH = 36;
+    baseY = 56;
+    svgH = 68;
+    fs = 7;
+    labelY = 64;
+    rx = 3;
+    minBar = 5;
+  } else if (compact) {
+    barW = Math.min(40, Math.floor(280 / Math.max(k, 1)));
+    gap = 6;
+    svgW = Math.min(360, 28 + k * (barW + gap));
+    maxH = 56;
+    baseY = 88;
+    svgH = 108;
+    fs = 9;
+    labelY = 102;
+    rx = 4;
+    minBar = 6;
+  } else {
+    barW = Math.min(64, Math.floor(340 / Math.max(k, 1)));
+    gap = 10;
+    svgW = Math.min(420, 28 + k * (barW + gap));
+    maxH = 150;
+    baseY = 180;
+    svgH = 230;
+    fs = 11;
+    labelY = 196;
+    rx = 6;
+    minBar = 8;
   }
-  if (count === 0) return null;
-  return sum / count;
+  return (
+    <svg
+      viewBox={`0 0 ${svgW} ${svgH}`}
+      className={`adv-soilplus-svg${compact ? " adv-soilplus-svg--compact" : ""}${thumb ? " adv-soilplus-svg--thumb" : ""}`}
+      role="img"
+      aria-label="Muestras por cluster"
+    >
+      {Array.from({ length: k }, (_, i) => {
+        const count = Number(arr[i]) || 0;
+        const bh = Math.max(minBar, (count / total) * maxH);
+        const x = 14 + i * (barW + gap);
+        const y = baseY - bh;
+        const fill = SOIL_CLUSTER_BAR_COLORS[i % SOIL_CLUSTER_BAR_COLORS.length];
+        return (
+          <g key={`cbar-${i}`}>
+            <rect x={x} y={y} width={barW} height={bh} fill={fill} rx={rx} />
+            <text x={x + barW / 2} y={labelY} textAnchor="middle" fontSize={fs}>
+              C{i + 1}
+            </text>
+            <text x={x + barW / 2} y={Math.max(10, y - 3)} textAnchor="middle" fontSize={fs}>
+              {count}
+            </text>
+          </g>
+        );
+      })}
+    </svg>
+  );
 }
 
-function computeSampleAllocation(snc, f1, f2, f3) {
-  const totalSamples = Math.max(1, Number(snc) || 1);
-  const values = [f1, f2, f3].map((v) => Math.max(0, Number(v) || 0));
-  const den = values.reduce((acc, v) => acc + v, 0);
-  if (den <= 0) {
-    const base = Math.floor(totalSamples / 3);
-    const rem = totalSamples - base * 3;
-    return [base + (rem > 0 ? 1 : 0), base + (rem > 1 ? 1 : 0), base];
+function SoilFcmSampleTriangles({ points, viewWidth, viewHeight }) {
+  const w = Math.max(1, Number(viewWidth) || 1);
+  const h = Math.max(1, Number(viewHeight) || 1);
+  const s = Math.max(0.2, Math.min(w, h) / 880);
+  const arr = Array.isArray(points) ? points : [];
+  if (!arr.length || !Number.isFinite(w) || !Number.isFinite(h)) return null;
+  return (
+    <svg
+      className="adv-soilplus-sample-overlay"
+      viewBox={`0 0 ${w} ${h}`}
+      preserveAspectRatio="xMidYMid meet"
+      aria-hidden
+    >
+      {arr.map((p) => {
+        const cx = Number(p.col);
+        const cy = Number(p.row);
+        if (!Number.isFinite(cx) || !Number.isFinite(cy)) return null;
+        const cid =
+          p.cluster != null && Number.isFinite(Number(p.cluster)) ? Number(p.cluster) : 0;
+        const fill = SOIL_CLUSTER_BAR_COLORS[cid % SOIL_CLUSTER_BAR_COLORS.length];
+        const pts = `${cx},${cy - s} ${cx - s * 0.92},${cy + s * 0.58} ${cx + s * 0.92},${cy + s * 0.58}`;
+        return (
+          <polygon
+            key={`sp-${p.index}-${p.row}-${p.col}`}
+            points={pts}
+            fill={fill}
+            fillOpacity={0.92}
+            stroke="#fff"
+            strokeWidth={Math.max(0.1, s * 0.35)}
+            strokeLinejoin="round"
+          />
+        );
+      })}
+    </svg>
+  );
+}
+
+function SoilQCurveChart({ data }) {
+  if (!data?.k_values?.length) return <p className="adv-soilplus-image-empty">Pulsa Ejecutar.</p>;
+  const pts = [];
+  for (let i = 0; i < data.k_values.length; i += 1) {
+    const q = data.q_values[i];
+    if (q != null && Number.isFinite(Number(q))) pts.push({ k: Number(data.k_values[i]), q: Number(q) });
   }
-  const raw = values.map((v) => (v / den) * totalSamples);
-  const alloc = raw.map((v) => Math.floor(v));
-  let remain = totalSamples - alloc.reduce((acc, v) => acc + v, 0);
-  const order = raw
-    .map((v, i) => ({ i, frac: v - Math.floor(v) }))
-    .sort((a, b) => b.frac - a.frac);
-  let k = 0;
-  while (remain > 0) {
-    alloc[order[k % order.length].i] += 1;
-    remain -= 1;
-    k += 1;
-  }
-  return alloc;
+  if (!pts.length) return <p className="adv-soilplus-image-empty">Sin valores Q válidos.</p>;
+
+  const W = 280;
+  const H = 148;
+  const pl = 46;
+  const pr = 14;
+  const pt = 16;
+  const pb = 34;
+  const kMin = Math.min(...pts.map((p) => p.k));
+  const kMax = Math.max(...pts.map((p) => p.k));
+  const qMin = Math.min(...pts.map((p) => p.q));
+  const qMax = Math.max(...pts.map((p) => p.q));
+  const qPad = Math.max((qMax - qMin) * 0.1, 0.015);
+  const yLo = qMin - qPad;
+  const yHi = qMax + qPad;
+  const xScale = (k) => pl + ((k - kMin) / Math.max(kMax - kMin, 1)) * (W - pl - pr);
+  const yScale = (q) => pt + (1 - (q - yLo) / Math.max(yHi - yLo, 1e-9)) * (H - pt - pb);
+  const linePts = pts.map((p) => `${xScale(p.k)},${yScale(p.q)}`).join(" ");
+
+  const xTicks = [...new Set(pts.map((p) => p.k))].sort((a, b) => a - b);
+  const ySpan = yHi - yLo;
+  const nY = 5;
+  const yTicks =
+    ySpan < 1e-12
+      ? [yLo]
+      : Array.from({ length: nY }, (_, i) => yLo + (i / (nY - 1)) * ySpan);
+  const qDecimals = ySpan < 0.08 ? 3 : ySpan < 0.25 ? 3 : 2;
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="adv-soilplus-q-chart" role="img" aria-label="Curva Q versus número de clusters">
+      <line x1={pl} y1={pt} x2={pl} y2={H - pb} stroke="#cbd5e1" strokeWidth="1" />
+      <line x1={pl} y1={H - pb} x2={W - pr} y2={H - pb} stroke="#cbd5e1" strokeWidth="1" />
+      {yTicks.map((qv) => {
+        const y = yScale(qv);
+        if (!Number.isFinite(y)) return null;
+        return (
+          <g key={`qyt-${qv}`}>
+            <line x1={pl - 4} y1={y} x2={pl} y2={y} stroke="#94a3b8" strokeWidth="1" />
+            <text x={pl - 6} y={y + 3} textAnchor="end" fontSize="8" fill="#64748b">
+              {Number(qv.toFixed(6)).toFixed(qDecimals)}
+            </text>
+          </g>
+        );
+      })}
+      {xTicks.map((k) => {
+        const x = xScale(k);
+        if (!Number.isFinite(x)) return null;
+        return (
+          <g key={`qxt-${k}`}>
+            <line x1={x} y1={H - pb} x2={x} y2={H - pb + 4} stroke="#94a3b8" strokeWidth="1" />
+            <text x={x} y={H - pb + 13} textAnchor="middle" fontSize="8" fill="#64748b">
+              {String(k)}
+            </text>
+          </g>
+        );
+      })}
+      <polyline fill="none" stroke="#2563eb" strokeWidth="1.6" strokeDasharray="6 4" points={linePts} />
+      {pts.map((p) => (
+        <circle key={`qk-${p.k}`} cx={xScale(p.k)} cy={yScale(p.q)} r={4.5} fill="#2563eb" stroke="#1d4ed8" strokeWidth="0.9" />
+      ))}
+      <text x={(pl + W - pr) / 2} y={H - 4} textAnchor="middle" fontSize="9" fill="#475569">
+        Número de clusters (K)
+      </text>
+      <text x={10} y={(pt + H - pb) / 2} textAnchor="middle" fontSize="9" fill="#475569" transform={`rotate(-90 10 ${(pt + H - pb) / 2})`}>
+        Q
+      </text>
+    </svg>
+  );
 }
 
 export default function AdvancedDashboard({
@@ -193,7 +344,9 @@ export default function AdvancedDashboard({
   onClose,
   token,
   projectId,
+  projectName = "",
   isCliente = false,
+  initialSmartFocus = "cluster",
   projectStatus,
 }) {
   const [loading, setLoading] = useState(false);
@@ -236,25 +389,36 @@ export default function AdvancedDashboard({
   const [soilPlusOpen, setSoilPlusOpen] = useState(false);
   const [soilPlusBusy, setSoilPlusBusy] = useState(false);
   const [soilPlusError, setSoilPlusError] = useState("");
-  const [soilSampleCount, setSoilSampleCount] = useState(657);
+  const [soilSampleCount, setSoilSampleCount] = useState(60);
   const [soilWindowSize, setSoilWindowSize] = useState(13);
   const [soilClusterCount, setSoilClusterCount] = useState(4);
   const [soilVars, setSoilVars] = useState({ f1: null, f2: null, f3: null });
   const [soilDemInfo, setSoilDemInfo] = useState(null);
   const [soilDemPreview, setSoilDemPreview] = useState("");
   const [soilCvPreview, setSoilCvPreview] = useState("");
+  const [soilAspectPreview, setSoilAspectPreview] = useState("");
+  const [soilSlopePreview, setSoilSlopePreview] = useState("");
   const [soilClusterPreview, setSoilClusterPreview] = useState("");
-  const [soilElbow, setSoilElbow] = useState(null);
+  const [soilSamplingPlan, setSoilSamplingPlan] = useState(null);
+  const [soilQCurve, setSoilQCurve] = useState(null);
   const [soilClusterZoom, setSoilClusterZoom] = useState(1);
   const [soilClusterPan, setSoilClusterPan] = useState({ x: 0, y: 0 });
   const [soilClusterDragging, setSoilClusterDragging] = useState(false);
-
+  const [soilClusterNaturalSize, setSoilClusterNaturalSize] = useState({ w: 0, h: 0 });
+  const [soilRoi, setSoilRoi] = useState(() => defaultRoi());
+  const [soilCvColormap, setSoilCvColormap] = useState("jet");
+  const [soilFishnetStep, setSoilFishnetStep] = useState(5);
+  const [soilCvEngineActive, setSoilCvEngineActive] = useState("fast");
+  const [clientSoilSummary, setClientSoilSummary] = useState(null);
+  const [clientSoilImgUrls, setClientSoilImgUrls] = useState({ fast: {}, matlab: {} });
+  const clientSoilImgRevokeRef = useRef({ fast: {}, matlab: {} });
   const previewCacheRef = useRef(new Map());
   const seriesCacheRef = useRef(new Map());
   const recortesCacheRef = useRef({ s2: null, ps: null });
   const loadedProjectRef = useRef(null);
   const soilDragRef = useRef({ dragging: false, startX: 0, startY: 0, panX: 0, panY: 0 });
   const effectiveToken = token || loadStoredAuth().access || "";
+  const isAdminView = !isCliente;
 
   const clientDashboardBlocked = useMemo(() => {
     if (!isCliente) return false;
@@ -428,7 +592,7 @@ export default function AdvancedDashboard({
     };
   }, [open, projectId, effectiveToken, clientDashboardBlocked]);
 
-  const runSmartClusters = async () => {
+  const loadSmartClusterPreviews = async () => {
     if (!projectId || !effectiveToken || clientDashboardBlocked) return;
     const base = API_URL.replace(/\/$/, "");
     const slot = (preset) =>
@@ -455,24 +619,31 @@ export default function AdvancedDashboard({
       setBusy(true);
       setErr("");
       try {
-        await api.post(
-          `/preprocess/ps-spatiotemporal-cluster/${projectId}`,
-          { n_clusters: 4, random_state: 42 },
-          { params: { preset } }
-        );
         const dataUrl = await fetchPreviewObjectUrl(
           `${base}/preprocess/ps-spatiotemporal-cluster-preview/${projectId}?preset=${encodeURIComponent(preset)}`,
           effectiveToken
         );
         setPreview(dataUrl);
       } catch (e) {
-        setErr(formatApiErrorDetail(e));
         setPreview("");
+        setErr(formatApiErrorDetail(e));
       } finally {
         setBusy(false);
       }
     }
   };
+
+  useEffect(() => {
+    if (!open) return;
+    void loadSmartClusterPreviews();
+  }, [open, projectId, effectiveToken, clientDashboardBlocked]);
+
+  useEffect(() => {
+    if (!open) return;
+    if (initialSmartFocus === "soil") {
+      setSoilPlusOpen(true);
+    }
+  }, [open, initialSmartFocus]);
 
   useEffect(() => {
     if (!open) return;
@@ -655,57 +826,74 @@ export default function AdvancedDashboard({
     () => JSON.stringify({ p: pointSelection, r: roiSelection }),
     [pointSelection, roiSelection]
   );
-  const soilSampleAllocation = useMemo(
-    () => computeSampleAllocation(soilSampleCount, soilVars.f1, soilVars.f2, soilVars.f3),
-    [soilSampleCount, soilVars]
-  );
-  const soilBars = useMemo(
-    () => [
-      { key: "f1", label: "f1: media PlanetScope banda 8", value: soilVars.f1 },
-      { key: "f2", label: "f2: cluster Smart 1", value: soilVars.f2 },
-      { key: "f3", label: "f3: cluster Smart 3", value: soilVars.f3 },
-    ],
-    [soilVars]
-  );
-
-  const runSoilPlus = async () => {
+  const runSoilPlusSave = async (cv_engine) => {
     if (!projectId || clientDashboardBlocked) return;
     setSoilPlusBusy(true);
     setSoilPlusError("");
+    const eng = cv_engine === "matlab" ? "matlab" : "fast";
+    setSoilCvEngineActive(eng);
     try {
       if (effectiveToken) setAuthToken(effectiveToken);
       const base = API_URL.replace(/\/$/, "");
-      const demPreviewUrl = `${base}/preprocess/soilplus-dem-preview/${projectId}`;
-      const cvPreviewUrl = `${base}/preprocess/soilplus-cv-preview/${projectId}?window_size=${encodeURIComponent(
-        String(soilWindowSize)
-      )}`;
-      const clusterPreviewUrl = `${base}/preprocess/soilplus-cluster-preview/${projectId}?n_clusters=${encodeURIComponent(
-        String(soilClusterCount)
-      )}`;
-      const [f1Resp, demResp, elbowResp, demPng, cvPng, clusterPng, f2, f3] = await Promise.all([
-        api.get(`/preprocess/ps-soilplus-f1/${projectId}`),
-        api.get(`/preprocess/soilplus-dem-input/${projectId}`, {
-          params: { window_size: soilWindowSize },
-        }),
-        api.get(`/preprocess/soilplus-elbow/${projectId}`, {
-          params: { k_min: 2, k_max: Math.max(10, soilClusterCount + 2) },
-        }),
-        fetchPreviewObjectUrl(demPreviewUrl, effectiveToken),
-        fetchPreviewObjectUrl(cvPreviewUrl, effectiveToken),
-        fetchPreviewObjectUrl(clusterPreviewUrl, effectiveToken),
-        computeImageMeanGray(psStCluster1Preview),
-        computeImageMeanGray(psStCluster3Preview),
-      ]);
-      setSoilVars({
-        f1: Number(f1Resp?.data?.f1_band8_mean ?? 0),
-        f2,
-        f3,
+      const roiQ = soilRoiToQueryParam(soilRoi);
+      const params = {
+        window_size: soilWindowSize,
+        cv_engine: eng,
+        n_clusters: soilClusterCount,
+        fishnet_step: soilFishnetStep,
+        total_samples: soilSampleCount,
+        cmap: soilCvColormap,
+        m: 2.0,
+      };
+      if (roiQ) params.roi_polygon = roiQ;
+      const { data } = await api.post(`/preprocess/soilplus-execute-save/${projectId}`, null, {
+        params,
       });
-      setSoilDemInfo(demResp?.data || null);
-      setSoilElbow(elbowResp?.data || null);
-      setSoilDemPreview(demPng || "");
-      setSoilCvPreview(cvPng || "");
-      setSoilClusterPreview(clusterPng || "");
+
+      const vk = eng === "matlab" ? "matlab" : "fast";
+      const kinds = ["dem", "cv", "fcm", "aspect", "slope"];
+      const imgEntries = await Promise.all(
+        kinds.map(async (kind) => [kind, await fetchPreviewObjectUrl(`${base}/preprocess/soilplus-saved-img/${projectId}?variant=${vk}&kind=${kind}`, effectiveToken)])
+      );
+      const imgMap = Object.fromEntries(imgEntries);
+      const tr = data?.terrain ?? {};
+      setSoilVars({
+        f1: Number(tr?.f1 ?? 0),
+        f2: Number(tr?.f2 ?? 0),
+        f3: Number(tr?.f3 ?? 0),
+      });
+      setSoilDemInfo({
+        project_id: data?.project_id,
+        input_image_path: data?.dem_input_image_path ?? "",
+        window_size: data?.window_size,
+        roi_pixel_count: data?.roi_pixel_count,
+        roi_polygon_applied: data?.roi_polygon_applied,
+        polygon_area_ha: data?.polygon_area_ha,
+        suggested_sample_count: data?.total_samples,
+        dem_mean: data?.dem_mean_snapshot,
+        dem_roi_mean: data?.dem_roi_mean_snapshot,
+        cv_mean: data?.cv_mean_snapshot,
+        cv_run: data?.cv_run,
+      });
+      setSoilDemPreview(imgMap.dem || "");
+      setSoilCvPreview(imgMap.cv || "");
+      setSoilAspectPreview(imgMap.aspect || "");
+      setSoilSlopePreview(imgMap.slope || "");
+      setSoilClusterPreview(imgMap.fcm || "");
+      setSoilSamplingPlan({
+        samples_per_cluster: data?.samples_per_cluster,
+        samples_requested_per_cluster: data?.samples_requested_per_cluster,
+        total_samples: data?.total_samples,
+        total_samples_placed: data?.total_samples_placed,
+        total_samples_inferred: data?.total_samples_inferred,
+        sample_points: data?.sample_points,
+        raster_shape: data?.raster_shape,
+        n_clusters: data?.n_clusters,
+        fishnet_step: data?.fishnet_step,
+        cv_run: data?.cv_run,
+        window_size: data?.window_size,
+      });
+      setSoilQCurve(data?.q_curve ?? null);
       setSoilClusterZoom(1);
       setSoilClusterPan({ x: 0, y: 0 });
     } catch (e) {
@@ -714,6 +902,127 @@ export default function AdvancedDashboard({
       setSoilPlusBusy(false);
     }
   };
+
+  useEffect(() => {
+    setSoilRoi(defaultRoi());
+    setSoilSamplingPlan(null);
+    setSoilQCurve(null);
+    setSoilAspectPreview("");
+    setSoilSlopePreview("");
+  }, [projectId]);
+
+  useEffect(() => {
+    if (!soilPlusOpen || !projectId || clientDashboardBlocked || !effectiveToken) return;
+    if (!soilRoi?.closed || !Array.isArray(soilRoi.points) || soilRoi.points.length < 3) return;
+    const roiQ = soilRoiToQueryParam(soilRoi);
+    if (!roiQ) return;
+    let cancelled = false;
+    const t = setTimeout(() => {
+      (async () => {
+        try {
+          setAuthToken(effectiveToken);
+          const { data } = await api.get(`/preprocess/soilplus-dem-input/${projectId}`, {
+            params: { window_size: soilWindowSize, roi_polygon: roiQ, cv_engine: soilCvEngineActive },
+          });
+          const s = data?.suggested_sample_count;
+          if (!cancelled && s != null) setSoilSampleCount(Math.max(1, Math.round(Number(s))));
+        } catch {
+          /* ignore */
+        }
+      })();
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [soilPlusOpen, projectId, clientDashboardBlocked, effectiveToken, soilRoi.closed, soilRoi.points, soilWindowSize, soilCvEngineActive]);
+
+  useEffect(() => {
+    if (!soilPlusOpen || !projectId || clientDashboardBlocked || !effectiveToken) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        setAuthToken(effectiveToken);
+        const base = API_URL.replace(/\/$/, "");
+        const demPng = await fetchPreviewObjectUrl(`${base}/preprocess/soilplus-dem-preview/${projectId}`, effectiveToken);
+        if (!cancelled) setSoilDemPreview(demPng || "");
+      } catch {
+        if (!cancelled) setSoilDemPreview("");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [soilPlusOpen, projectId, clientDashboardBlocked, effectiveToken]);
+
+  useEffect(() => {
+    const revokeBuckets = (b) => {
+      if (!b) return;
+      for (const vk of ["fast", "matlab"]) {
+        const bucket = b[vk] || {};
+        for (const url of Object.values(bucket)) safeRevokePreviewUrl(url);
+      }
+    };
+
+    if (!open || !projectId || clientDashboardBlocked || !effectiveToken) {
+      revokeBuckets(clientSoilImgRevokeRef.current);
+      clientSoilImgRevokeRef.current = { fast: {}, matlab: {} };
+      setClientSoilImgUrls({ fast: {}, matlab: {} });
+      setClientSoilSummary(null);
+      return undefined;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        setAuthToken(effectiveToken);
+        const { data } = await api.get(`/preprocess/soilplus-saved-summary/${projectId}`);
+        if (cancelled) return;
+        const variants = data?.variants || {};
+        setClientSoilSummary(variants);
+        const base = API_URL.replace(/\/$/, "");
+        const nextBucket = { fast: {}, matlab: {} };
+        for (const vk of ["fast", "matlab"]) {
+          if (!variants[vk]) continue;
+          for (const kind of ["dem", "cv", "fcm"]) {
+            try {
+              nextBucket[vk][kind] = await fetchPreviewObjectUrl(
+                `${base}/preprocess/soilplus-saved-img/${projectId}?variant=${vk}&kind=${kind}`,
+                effectiveToken
+              );
+            } catch {
+              nextBucket[vk][kind] = "";
+            }
+          }
+        }
+        if (cancelled) {
+          revokeBuckets(nextBucket);
+          return;
+        }
+        revokeBuckets(clientSoilImgRevokeRef.current);
+        clientSoilImgRevokeRef.current = nextBucket;
+        setClientSoilImgUrls(nextBucket);
+      } catch {
+        if (!cancelled) {
+          revokeBuckets(clientSoilImgRevokeRef.current);
+          clientSoilImgRevokeRef.current = { fast: {}, matlab: {} };
+          setClientSoilImgUrls({ fast: {}, matlab: {} });
+          setClientSoilSummary(null);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [open, projectId, clientDashboardBlocked, effectiveToken]);
+
+  useEffect(() => {
+    setSoilClusterNaturalSize({ w: 0, h: 0 });
+  }, [soilClusterPreview]);
+
+  const soilClusterViewW =
+    soilClusterNaturalSize.w || Number(soilSamplingPlan?.raster_shape?.width) || 0;
+  const soilClusterViewH =
+    soilClusterNaturalSize.h || Number(soilSamplingPlan?.raster_shape?.height) || 0;
 
   const handleSoilClusterWheel = (e) => {
     if (!e.ctrlKey) return;
@@ -872,6 +1181,9 @@ export default function AdvancedDashboard({
       <div className="adv-dashboard-window">
         <div className="adv-dashboard-header">
           <h2>BioAgroMap -> Dashboard multisensor Espectral-Espacio-Temporal</h2>
+          <span className="adv-dashboard-project-pill">
+            Proyecto: {projectName || `ID ${projectId || "—"}`}
+          </span>
           <div className="adv-dashboard-header-actions">
             <button
               type="button"
@@ -996,15 +1308,53 @@ export default function AdvancedDashboard({
             <section className="adv-timelapse-geofisica" aria-label="Geofísica y modelado de suelo">
               <div className="adv-timelapse-geofisica-head">
                 <h3 className="adv-timelapse-geofisica-title">AGRO Geofisica - Modelado del suelo agricola</h3>
-                <button type="button" className="adv-soilplus-btn" onClick={() => setSoilPlusOpen(true)}>
-                  Soil+
-                </button>
+                <span className="adv-smart-cluster-msg">Solo visualizacion en dashboard.</span>
               </div>
               <div className="adv-timelapse-geofisica-frame">
                 <img
                   src={`${import.meta.env.BASE_URL}dashboard-geofisica-modelado-suelo.png`}
                   alt="Modelado geofísico del suelo agrícola"
                 />
+              </div>
+              <div className="adv-geofisica-soil-head">
+                <h4 className="adv-geofisica-soil-title">Smart Soil — resultados guardados (Fast / Mat)</h4>
+                {isAdminView ? (
+                  <button type="button" className="adv-soilplus-btn" onClick={() => setSoilPlusOpen(true)}>
+                    Editor Soil+
+                  </button>
+                ) : null}
+              </div>
+              <div className="adv-smart-soil-dashboard">
+                <p className="adv-smart-cluster-msg">
+                  Mapas DEM / CV / FCM persistidos tras &quot;Ejecutar Fast&quot; o &quot;Ejecutar Mat&quot; desde el editor. El cliente solo ve estos resultados cuando el
+                  proyecto está publicado y el equipo ha ejecutado y guardado el flujo.
+                </p>
+                {(["fast", "matlab"]).map((vk) => (
+                  <div key={vk} className="adv-smart-soil-variant">
+                    <h5 className="adv-smart-cluster-heading">{vk === "fast" ? "Fast (CVE rápido, guardado)" : "Mat (CV tipo MATLAB, guardado)"}</h5>
+                    {clientSoilSummary?.[vk]?.saved_at ? (
+                      <p className="adv-soilplus-dem-meta">
+                        Guardado {String(clientSoilSummary[vk].saved_at)}
+                        {" · "}
+                        muestras {clientSoilSummary[vk]?.total_samples_placed ?? "—"} / objetivo {clientSoilSummary[vk]?.total_samples ?? "—"}
+                        {" · K="}
+                        {clientSoilSummary[vk]?.n_clusters ?? "—"}
+                      </p>
+                    ) : (
+                      <p className="adv-smart-cluster-msg">Sin archivo guardado para esta variante todavía.</p>
+                    )}
+                    <div className="adv-smart-soil-thumbs">
+                      {(["dem", "cv", "fcm"]).map((kind) =>
+                        clientSoilImgUrls?.[vk]?.[kind] ? (
+                          <div key={`${vk}-${kind}`} className="adv-smart-soil-thumb-cell">
+                            <span className="adv-smart-soil-thumb-label">{kind.toUpperCase()}</span>
+                            <img className="adv-smart-soil-thumb-img" src={clientSoilImgUrls[vk][kind]} alt={`${vk} ${kind}`} />
+                          </div>
+                        ) : null
+                      )}
+                    </div>
+                  </div>
+                ))}
               </div>
             </section>
           </div>
@@ -1046,21 +1396,7 @@ export default function AdvancedDashboard({
                   ))}
                 </div>
               </div>
-              <section className="adv-smart-clusters-panel" aria-label="Clusters Smart">
-                <div className="cluster-actions-row">
-                  <button
-                    type="button"
-                    className="cluster-open-results-btn"
-                    onClick={() => void runSmartClusters()}
-                    disabled={
-                      clientDashboardBlocked || psStCluster1Busy || psStCluster2Busy || psStCluster3Busy
-                    }
-                  >
-                    {psStCluster1Busy || psStCluster2Busy || psStCluster3Busy
-                      ? "Generando clusters..."
-                      : "Generar clusters Smart"}
-                  </button>
-                </div>
+              <section className="adv-smart-clusters-panel" aria-label="Smart Agro dashboard">
                 <div className="adv-smart-clusters-grid">
                   <div className="adv-smart-cluster-cell">
                     <h4 className="adv-smart-cluster-heading">cluster Smart 1</h4>
@@ -1121,6 +1457,12 @@ export default function AdvancedDashboard({
                   </div>
                 </div>
               </section>
+
+              {!loading && !clientDashboardBlocked && !sensorData.s1 && !sensorData.s2 && !sensorData.ps ? (
+                <p className="adv-smart-cluster-msg">
+                  El proyecto seleccionado no tiene inventarios procesados todavía (S1/S2/PS) para mostrar en el dashboard.
+                </p>
+              ) : null}
             </div>
           </div>
         </div>
@@ -1130,17 +1472,32 @@ export default function AdvancedDashboard({
           <div className="adv-soilplus-backdrop" onClick={() => setSoilPlusOpen(false)} />
           <div className="adv-soilplus-window">
             <div className="adv-soilplus-header">
-              <h3>Soil+ | Flujo Agrogeofisica (Hoya_RS adaptado)</h3>
+              <h3>Soil+ | Flujo agrogeofísica</h3>
               <button type="button" className="adv-close-btn" onClick={() => setSoilPlusOpen(false)} aria-label="Cerrar">
                 ×
               </button>
             </div>
             <p className="adv-soilplus-note">
-              f1: media PlanetScope banda 8. f2: cluster smart 1. f3: cluster smart 3. SNC: # muestra.
+              Entrada: DEM. Ejecutar <strong>Fast</strong>: CV por sumas en caja (windowSize = lado impar en px). Ejecutar <strong>Mat</strong>: igual que{' '}
+              <code>CV.m</code> (windowSize = parámetro <code>ws</code>, ventana (2×ws+1)² con <code>nonzeros</code>). Los dos modos guardan JSON y PNG bajo{' '}
+              <code>dem/soilplus_saved_*</code> y aparecen en <strong>AGRO Geofísica</strong> del dashboard para el cliente.
             </p>
             <div className="adv-soilplus-controls">
-              <button type="button" className="adv-soilplus-run-btn" onClick={() => void runSoilPlus()} disabled={soilPlusBusy}>
-                {soilPlusBusy ? "Ejecutando..." : "Ejecutar"}
+              <button
+                type="button"
+                className="adv-soilplus-run-btn"
+                onClick={() => void runSoilPlusSave("fast")}
+                disabled={soilPlusBusy}
+              >
+                {soilPlusBusy ? "Ejecutando…" : "Ejecutar Fast"}
+              </button>
+              <button
+                type="button"
+                className="adv-soilplus-run-btn adv-soilplus-run-btn--mat"
+                onClick={() => void runSoilPlusSave("matlab")}
+                disabled={soilPlusBusy}
+              >
+                {soilPlusBusy ? "Ejecutando…" : "Ejecutar Mat"}
               </button>
               <label>
                 # muestra (SNC)
@@ -1153,15 +1510,36 @@ export default function AdvancedDashboard({
                 />
               </label>
               <label>
-                windowSize
+                Window / ws
                 <input
                   type="number"
-                  min={3}
+                  min={1}
                   max={101}
                   step={1}
                   value={soilWindowSize}
-                  onChange={(e) => setSoilWindowSize(Math.max(3, Number(e.target.value) || 3))}
+                  onChange={(e) => setSoilWindowSize(Math.max(1, Number(e.target.value) || 1))}
                 />
+              </label>
+              <label>
+                fishNet step
+                <input
+                  type="number"
+                  min={1}
+                  max={80}
+                  step={1}
+                  value={soilFishnetStep}
+                  onChange={(e) => setSoilFishnetStep(Math.max(1, Number(e.target.value) || 1))}
+                />
+              </label>
+              <label>
+                Paleta CV
+                <select value={soilCvColormap} onChange={(e) => setSoilCvColormap(e.target.value)}>
+                  <option value="jet">jet</option>
+                  <option value="spectral">spectral</option>
+                  <option value="turbo">turbo</option>
+                  <option value="viridis">viridis</option>
+                  <option value="plasma">plasma</option>
+                </select>
               </label>
               <label>
                 Numero de cluster
@@ -1184,110 +1562,36 @@ export default function AdvancedDashboard({
                   `/home/deep/Documentos/BioAgroMap/data/storage/tenant_activo/project_${projectId || "?"}/dem/band_1.img`}
               </code>
             </p>
-            <div className="adv-soilplus-grid">
-              <section className="adv-soilplus-card">
-                <h4>DEM de entrada (band_1.img)</h4>
+            <div className="adv-soilplus-window-scroll">
+              <div className="adv-soilplus-top-row">
+                <section className="adv-soilplus-card adv-soilplus-card--dem-top">
+                  <h4>DEM de entrada (band_1.img)</h4>
+                  <p className="adv-soilplus-dem-meta">
+                    {soilDemInfo
+                      ? `windowSize: ${soilDemInfo.window_size} | Media DEM: ${Number(soilDemInfo.dem_mean || 0).toFixed(3)} | Std: ${Number(
+                          soilDemInfo.dem_std || 0
+                        ).toFixed(3)} | Min: ${Number(soilDemInfo.dem_min || 0).toFixed(3)} | Max: ${Number(
+                          soilDemInfo.dem_max || 0
+                        ).toFixed(3)} | CV mean: ${Number(soilDemInfo.cv_mean || 0).toFixed(4)} ${
+                          soilDemInfo.roi_polygon_applied
+                            ? `(ROI ${soilDemInfo.roi_pixel_count ?? 0} px; DEM ROI μ ${Number(soilDemInfo.dem_roi_mean || 0).toFixed(3)})`
+                            : "(toda la mascara DEM)"
+                        }${
+                          soilVars.f1 != null
+                            ? ` | f1 ${Number(soilVars.f1).toFixed(4)} | f2 ${Number(soilVars.f2).toFixed(4)} | f3 ${Number(soilVars.f3).toFixed(4)}`
+                            : ""
+                        }`
+                      : "Dibuja un polígono opcional sobre el DEM; pulsa Ejecutar para estadísticos y CV."}
+                  </p>
+                  <div className="adv-soilplus-image-frame adv-soilplus-image-frame--dem-roi">
+                    <DemRoiEditor imageUrl={soilDemPreview} disabled={soilPlusBusy} value={soilRoi} onChange={setSoilRoi} />
+                  </div>
+                </section>
+                <section className="adv-soilplus-card adv-soilplus-card--final-zoning">
+                <h4>Zonificación final — FCM sobre CV (K={soilClusterCount})</h4>
                 <p className="adv-soilplus-dem-meta">
-                  {soilDemInfo
-                    ? `windowSize: ${soilDemInfo.window_size} | Media: ${Number(soilDemInfo.dem_mean || 0).toFixed(3)} | Std: ${Number(
-                        soilDemInfo.dem_std || 0
-                      ).toFixed(3)} | Min: ${Number(soilDemInfo.dem_min || 0).toFixed(3)} | Max: ${Number(
-                        soilDemInfo.dem_max || 0
-                      ).toFixed(3)} | CV mean: ${Number(soilDemInfo.cv_mean || 0).toFixed(4)}`
-                    : "Pulsa Ejecutar para calcular estadisticos del DEM."}
+                  Clases difusas (exponente m=2) solo sobre el CV normalizado; triángulos = muestras repartidas por zona (coordenadas de píxel del raster).
                 </p>
-                <div className="adv-soilplus-image-frame">
-                  {soilDemPreview ? (
-                    <img src={soilDemPreview} alt="DEM band_1" className="adv-soilplus-image" />
-                  ) : (
-                    <p className="adv-soilplus-image-empty">Sin imagen. Pulsa Ejecutar.</p>
-                  )}
-                </div>
-              </section>
-              <section className="adv-soilplus-card">
-                <h4>Variables f1, f2, f3</h4>
-                <p className="adv-soilplus-dem-meta">Imagen despues de aplicar CV con windowSize={soilWindowSize}.</p>
-                <div className="adv-soilplus-image-frame">
-                  {soilCvPreview ? (
-                    <img src={soilCvPreview} alt="DEM CV" className="adv-soilplus-image" />
-                  ) : (
-                    <p className="adv-soilplus-image-empty">Sin imagen CV. Pulsa Ejecutar.</p>
-                  )}
-                </div>
-              </section>
-              <section className="adv-soilplus-card">
-                <h4>SN comp (asignacion por seccion)</h4>
-                <svg viewBox="0 0 420 230" className="adv-soilplus-svg" role="img" aria-label="Asignación SNH">
-                  {[0, 1, 2].map((i) => {
-                    const v = soilSampleAllocation[i] || 0;
-                    const h = Math.max(8, (v / Math.max(soilSampleCount, 1)) * 150);
-                    const x = 40 + i * 120;
-                    const y = 180 - h;
-                    return (
-                      <g key={`bar-${i}`}>
-                        <rect x={x} y={y} width="70" height={h} fill="#2d6cdf" rx="6" />
-                        <text x={x + 35} y={196} textAnchor="middle" fontSize="12">
-                          S{i + 1}
-                        </text>
-                        <text x={x + 35} y={Math.max(14, y - 6)} textAnchor="middle" fontSize="12">
-                          {v}
-                        </text>
-                      </g>
-                    );
-                  })}
-                </svg>
-              </section>
-              <section className="adv-soilplus-card">
-                <h4>Plot de variables (f1-f3)</h4>
-                <svg viewBox="0 0 420 230" className="adv-soilplus-svg" role="img" aria-label="Metodo del codo sobre band_1">
-                  {(() => {
-                    const ks = Array.isArray(soilElbow?.ks) ? soilElbow.ks : [];
-                    const ys = Array.isArray(soilElbow?.wcss) ? soilElbow.wcss : [];
-                    if (!ks.length || !ys.length) {
-                      return (
-                        <text x="210" y="120" textAnchor="middle" fontSize="12" fill="#64748b">
-                          Sin datos del codo. Pulsa Ejecutar.
-                        </text>
-                      );
-                    }
-                    const minK = Math.min(...ks);
-                    const maxK = Math.max(...ks);
-                    const minY = Math.min(...ys);
-                    const maxY = Math.max(...ys);
-                    const kDen = Math.max(1, maxK - minK);
-                    const yDen = Math.max(1e-9, maxY - minY);
-                    const px = (k) => 40 + ((k - minK) / kDen) * 340;
-                    const py = (y) => 190 - ((y - minY) / yDen) * 145;
-                    const points = ks.map((k, i) => `${px(k)},${py(ys[i])}`).join(" ");
-                    const selectedX = px(Math.min(maxK, Math.max(minK, soilClusterCount)));
-                    return (
-                      <>
-                        <line x1="40" y1="190" x2="380" y2="190" stroke="#94a3b8" />
-                        <line x1="40" y1="30" x2="40" y2="190" stroke="#94a3b8" />
-                        <polyline fill="none" stroke="#0ea5e9" strokeWidth="3" points={points} />
-                        <line x1={selectedX} y1="30" x2={selectedX} y2="190" stroke="#ef4444" strokeDasharray="4 4" />
-                        {ks.map((k, i) => {
-                          const x = px(k);
-                          const y = py(ys[i]);
-                          return (
-                            <g key={`elbow-${k}`}>
-                              <circle cx={x} cy={y} r="4" fill="#0ea5e9" />
-                              <text x={x} y={208} textAnchor="middle" fontSize="11">
-                                {k}
-                              </text>
-                            </g>
-                          );
-                        })}
-                        <text x="368" y="22" textAnchor="end" fontSize="11" fill="#ef4444">
-                          K={soilClusterCount}
-                        </text>
-                      </>
-                    );
-                  })()}
-                </svg>
-              </section>
-              <section className="adv-soilplus-card">
-                <h4>Salida cluster (K={soilClusterCount})</h4>
                 <div className="adv-soilplus-zoom-tools">
                   <button
                     type="button"
@@ -1335,7 +1639,7 @@ export default function AdvancedDashboard({
                   <span>{Math.round(soilClusterZoom * 100)}%</span>
                 </div>
                 <div
-                  className={`adv-soilplus-image-frame adv-soilplus-image-frame--cluster adv-soilplus-cluster-scroll${soilClusterDragging ? " is-dragging" : ""}`}
+                  className={`adv-soilplus-image-frame adv-soilplus-image-frame--cluster adv-soilplus-cluster-scroll${soilClusterDragging ? " is-dragging" : ""}${soilClusterZoom > 1.01 ? " allow-pan-overflow" : ""}`}
                   onWheel={handleSoilClusterWheel}
                   onMouseDown={handleSoilClusterMouseDown}
                   onMouseMove={handleSoilClusterMouseMove}
@@ -1344,18 +1648,99 @@ export default function AdvancedDashboard({
                   title="Ctrl + rueda para zoom; click y arrastre para navegar"
                 >
                   {soilClusterPreview ? (
-                    <img
-                      src={soilClusterPreview}
-                      alt="Cluster sobre DEM"
-                      className="adv-soilplus-image adv-soilplus-image--zoomable"
-                      style={{ transform: `translate(${soilClusterPan.x}px, ${soilClusterPan.y}px) scale(${soilClusterZoom})` }}
-                      draggable={false}
-                    />
+                    <div
+                      className="adv-soilplus-cluster-zoom-inner"
+                      style={{
+                        transform: `translate(${soilClusterPan.x}px, ${soilClusterPan.y}px) scale(${soilClusterZoom})`,
+                        transformOrigin: "center center",
+                      }}
+                    >
+                      <div className="adv-soilplus-cluster-img-lock">
+                        <img
+                          src={soilClusterPreview}
+                          alt="Zonificación FCM sobre CV"
+                          className={`adv-soilplus-image adv-soilplus-image--zoomable${soilClusterDragging ? " is-dragging" : ""}`}
+                          draggable={false}
+                          onLoad={(e) => {
+                            const im = e.currentTarget;
+                            setSoilClusterNaturalSize({ w: im.naturalWidth, h: im.naturalHeight });
+                          }}
+                        />
+                        <SoilFcmSampleTriangles
+                          points={soilSamplingPlan?.sample_points}
+                          viewWidth={soilClusterViewW}
+                          viewHeight={soilClusterViewH}
+                        />
+                      </div>
+                    </div>
                   ) : (
                     <p className="adv-soilplus-image-empty">Sin imagen de cluster. Pulsa Ejecutar.</p>
                   )}
                 </div>
-              </section>
+                </section>
+              </div>
+              <div className="adv-soilplus-bottom-strip">
+                <section className="adv-soilplus-card adv-soilplus-thumb">
+                  <h4>
+                    CV local ({soilCvColormap}) · {soilCvEngineActive === "matlab" ? "Mat" : "Fast"}
+                  </h4>
+                  <p className="adv-soilplus-dem-meta">Coef. variación (ventana {soilWindowSize}).</p>
+                  <div className="adv-soilplus-image-frame">
+                    {soilCvPreview ? (
+                      <img src={soilCvPreview} alt="CV local" className="adv-soilplus-image" />
+                    ) : (
+                      <p className="adv-soilplus-image-empty">Ejecutar</p>
+                    )}
+                  </div>
+                </section>
+                <section className="adv-soilplus-card adv-soilplus-thumb">
+                  <h4>Aspecto (°)</h4>
+                  <p className="adv-soilplus-dem-meta">Mapa direccional; paleta HSV.</p>
+                  <div className="adv-soilplus-image-frame">
+                    {soilAspectPreview ? (
+                      <img src={soilAspectPreview} alt="Aspecto terreno" className="adv-soilplus-image" />
+                    ) : (
+                      <p className="adv-soilplus-image-empty">Ejecutar</p>
+                    )}
+                  </div>
+                </section>
+                <section className="adv-soilplus-card adv-soilplus-thumb">
+                  <h4>Pendiente (°)</h4>
+                  <p className="adv-soilplus-dem-meta">Gradiente DEM; paleta inferno.</p>
+                  <div className="adv-soilplus-image-frame">
+                    {soilSlopePreview ? (
+                      <img src={soilSlopePreview} alt="Pendiente terreno" className="adv-soilplus-image" />
+                    ) : (
+                      <p className="adv-soilplus-image-empty">Ejecutar</p>
+                    )}
+                  </div>
+                </section>
+                <section className="adv-soilplus-card adv-soilplus-thumb">
+                  <h4>Muestras por cluster</h4>
+                  <p className="adv-soilplus-dem-meta">
+                    {soilSamplingPlan
+                      ? `Colocadas ${soilSamplingPlan.total_samples_placed ?? soilSamplingPlan.total_samples}${soilSamplingPlan.total_samples_placed !== soilSamplingPlan.total_samples ? ` (objetivo ${soilSamplingPlan.total_samples})` : ""}`
+                      : "SNC"}
+                  </p>
+                  {soilSamplingPlan?.samples_per_cluster ? (
+                    <SoilClusterSampleBars
+                      samples={soilSamplingPlan.samples_per_cluster}
+                      totalSamples={soilSamplingPlan.total_samples_placed ?? soilSamplingPlan.total_samples ?? soilSampleCount}
+                      clusterCount={soilClusterCount}
+                      thumb
+                    />
+                  ) : (
+                    <p className="adv-soilplus-image-empty">Ejecutar</p>
+                  )}
+                </section>
+                <section className="adv-soilplus-card adv-soilplus-thumb">
+                  <h4>Paso 3 — curva Q (K = 2…11)</h4>
+                  <p className="adv-soilplus-dem-meta">FCM sobre CV en ROI; Q = 1 − Σ n_k·var_k / (N·var total).</p>
+                  <div className="adv-soilplus-image-frame adv-soilplus-image-frame--qchart">
+                    <SoilQCurveChart data={soilQCurve} />
+                  </div>
+                </section>
+              </div>
             </div>
           </div>
         </div>

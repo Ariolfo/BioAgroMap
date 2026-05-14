@@ -1,4 +1,6 @@
 fastapi==0.115.0
+# FastAPI 0.115 exige starlette<0.39; Starlette 1.x rompe el arranque (Router: unexpected on_startup).
+starlette>=0.37.2,<0.39.0
 uvicorn[standard]==0.30.6
 python-multipart==0.0.9
 sqlalchemy==2.0.35
@@ -26,4 +28,5 @@ requests==2.32.3
 Pillow==10.4.0
 matplotlib==3.9.2
 scikit-learn==1.5.2
+scikit-fuzzy==0.4.2
 kneed==0.8.5

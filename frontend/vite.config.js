@@ -10,7 +10,7 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: 5173,
-    allowedHosts: ['suggestion-divided-mechanisms-fleet.trycloudflare.com'],// Volúmen ./frontend:/app: asegura HMR cuando el host no propaga inotify al contenedor.,
+    allowedHosts: ['zum-characterization-servers-socket.trycloudflare.com'],// Volúmen ./frontend:/app: asegura HMR cuando el host no propaga inotify al contenedor.,
     watch: {
       usePolling: true,
       interval: 800,

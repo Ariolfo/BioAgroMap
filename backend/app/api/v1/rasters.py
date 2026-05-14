@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shutil
 import uuid
 import zipfile
@@ -9,7 +10,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
-from app.api.deps import tenant_from_jwt
+from app.api.deps import require_admin, tenant_from_jwt
 from app.api.v1.helpers import (
     _existing_raster_path,
     _get_project_raster,
@@ -20,7 +21,8 @@ from app.api.v1.helpers import (
 )
 from app.core.config import settings
 from app.db.session import get_db
-from app.models.models import Project, RasterLayer
+from app.models.models import Project, RasterLayer, User
+from app.schemas.schemas import PurgeS2L2aRecortesBody
 from app.services.raster_geo import (
     bounds_wgs84_from_path,
     render_raster_preview_png,
@@ -31,6 +33,7 @@ from app.services.s2_composites import (
     s2_acquisition_date_label,
     s2_date_slug_for_filename,
 )
+from app.services.s2_vegetation_indices import sort_key_from_path_or_meta
 from app.services.sentinel_safe import (
     S2_BANDS_10M_ORDER,
     find_safe_ancestor,
@@ -236,6 +239,107 @@ def _remove_extract_dir_if_no_other_layers(
             shutil.rmtree(ep, ignore_errors=True)
     except Exception:
         pass
+
+
+def delete_raster_layer_row(db: Session, tenant_id: int, project_id: int, raster: RasterLayer) -> None:
+    """Elimina archivos en disco vinculados a la capa y la fila ``raster_layers``. No hace ``commit``."""
+    _remove_extract_dir_if_no_other_layers(db, project_id, tenant_id, raster)
+    stack_p = (raster.raster_metadata or {}).get("s2_stack_path")
+    rid = raster.id
+    for p in [raster.cog_path, raster.file_path]:
+        if p:
+            fp = Path(p)
+            if fp.exists():
+                fp.unlink(missing_ok=True)
+    if stack_p:
+        others = (
+            db.query(RasterLayer)
+            .filter(
+                RasterLayer.project_id == project_id,
+                RasterLayer.tenant_id == tenant_id,
+                RasterLayer.id != rid,
+            )
+            .all()
+        )
+        if not any((o.raster_metadata or {}).get("s2_stack_path") == stack_p for o in others):
+            sp = Path(stack_p).resolve()
+            root = Path(settings.storage_path).resolve()
+            if str(sp).startswith(str(root)) and sp.is_file():
+                sp.unlink(missing_ok=True)
+    db.delete(raster)
+
+
+def _normalize_s2_sort_keys(raw: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for s in raw:
+        t = (s or "").strip()
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", t):
+            continue
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+def _s2_rgb_gallery_raster_meta(meta: dict) -> bool:
+    """
+    Capas que la galería «Visual RGB (Sentinel-2)» puede listar (misma idea que
+    ``filterGalleryRasters`` en el frontend), excl. S1, PS y descargas crudas.
+    """
+    if not meta:
+        return False
+    if (meta.get("source") == "sentinel-2" or meta.get("source") == "sentinel-1") and meta.get("type") == "download":
+        return False
+    if is_legacy_s2_zip_band_raster(meta):
+        return False
+    if not meta.get("bounds_wgs84"):
+        return False
+    if meta.get("composite_kind") == "false_color_nir":
+        return False
+    if meta.get("planetscope_composite"):
+        return False
+    if meta.get("s1_grd_recorte"):
+        return False
+    return bool(
+        meta.get("s2_l2a_recorte")
+        or meta.get("s2_four_band_stack")
+        or meta.get("s2_six_band_stack")
+        or meta.get("composite_kind") == "true_color"
+    )
+
+
+def _scene_iso_yyyy_mm_dd_for_purge(raster: RasterLayer) -> str | None:
+    """Fecha de escena ISO (solo metadatos, ruta o nombre ``dd/mm/aaaa_clip``); nunca ``created_at``."""
+    meta = raster.raster_metadata or {}
+    sk = meta.get("s2_sort_key")
+    if isinstance(sk, str):
+        t = sk.strip()
+        if len(t) >= 10 and re.match(r"^\d{4}-\d{2}-\d{2}", t):
+            return t[:10]
+    try:
+        fp = Path(raster.file_path or "")
+    except Exception:
+        fp = Path("")
+    if raster.file_path:
+        fk = sort_key_from_path_or_meta(fp, meta)
+        if isinstance(fk, str):
+            t = fk.strip()
+            if len(t) >= 10 and re.match(r"^\d{4}-\d{2}-\d{2}", t):
+                return t[:10]
+    dl = meta.get("s2_date_label")
+    if isinstance(dl, str) and dl.count("/") == 2:
+        parts = [p.strip() for p in dl.split("/")]
+        if len(parts) == 3:
+            dd, mm, yyyy = parts[0], parts[1], parts[2]
+            if len(yyyy) == 4 and dd.isdigit() and mm.isdigit():
+                return f"{yyyy}-{mm.zfill(2)}-{dd.zfill(2)}"
+    name = (raster.name or "").strip()
+    m = re.match(r"^(\d{2})/(\d{2})/(\d{4})_clip$", name)
+    if m:
+        dd, mo, yyyy = m.group(1), m.group(2), m.group(3)
+        return f"{yyyy}-{mo}-{dd}"
+    return None
 
 
 @router.get("/raster/tenant-storage-browse")
@@ -796,28 +900,56 @@ def delete_raster(
     )
     if not raster:
         raise HTTPException(status_code=404, detail="Raster layer not found")
-    _remove_extract_dir_if_no_other_layers(db, project_id, tenant_id, raster)
-    stack_p = (raster.raster_metadata or {}).get("s2_stack_path")
-    for p in [raster.cog_path, raster.file_path]:
-        if p:
-            fp = Path(p)
-            if fp.exists():
-                fp.unlink(missing_ok=True)
-    if stack_p:
-        others = (
-            db.query(RasterLayer)
-            .filter(
-                RasterLayer.project_id == project_id,
-                RasterLayer.tenant_id == tenant_id,
-                RasterLayer.id != raster_id,
-            )
-            .all()
-        )
-        if not any((o.raster_metadata or {}).get("s2_stack_path") == stack_p for o in others):
-            sp = Path(stack_p).resolve()
-            root = Path(settings.storage_path).resolve()
-            if str(sp).startswith(str(root)) and sp.is_file():
-                sp.unlink(missing_ok=True)
-    db.delete(raster)
+    delete_raster_layer_row(db, tenant_id, project_id, raster)
     db.commit()
     return {"status": "ok", "deleted_raster_id": raster_id}
+
+
+@router.post("/raster/{project_id}/purge-s2-l2a-recortes")
+def purge_s2_l2a_recortes_by_sort_keys(
+    project_id: int,
+    payload: PurgeS2L2aRecortesBody,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+    _admin: User = Depends(require_admin),
+):
+    """
+    Elimina capas raster del proyecto que entran en la galería RGB Sentinel-2 y cuya fecha
+    de escena coincide con ``s2_sort_keys`` (ISO ``YYYY-MM-DD``). No exige solo
+    ``s2_l2a_recorte``: también compuestos true-color / seis bandas si la fecha se deduce
+    de metadatos, ruta o nombre ``dd/mm/aaaa_clip`` (casos que antes quedaban fuera del purge).
+    """
+    keys = _normalize_s2_sort_keys(payload.s2_sort_keys)
+    if not keys:
+        raise HTTPException(status_code=400, detail="Ninguna fecha válida (use YYYY-MM-DD).")
+    key_set = set(keys)
+    candidates = (
+        db.query(RasterLayer)
+        .filter(RasterLayer.project_id == project_id, RasterLayer.tenant_id == tenant_id)
+        .all()
+    )
+    to_delete: list[RasterLayer] = []
+    for r in candidates:
+        meta = r.raster_metadata or {}
+        if not _s2_rgb_gallery_raster_meta(meta):
+            continue
+        scene = _scene_iso_yyyy_mm_dd_for_purge(r)
+        if scene and scene in key_set:
+            to_delete.append(r)
+    deleted_ids: list[int] = []
+    deleted_detail: list[dict] = []
+    for r in to_delete:
+        rid = r.id
+        scene_hit = _scene_iso_yyyy_mm_dd_for_purge(r)
+        nm = r.name
+        delete_raster_layer_row(db, tenant_id, project_id, r)
+        deleted_ids.append(rid)
+        deleted_detail.append({"raster_layer_id": rid, "scene_iso": scene_hit, "name": nm})
+    db.commit()
+    return {
+        "status": "ok",
+        "deleted_raster_ids": deleted_ids,
+        "deleted_count": len(deleted_ids),
+        "s2_sort_keys": keys,
+        "deleted": deleted_detail,
+    }

@@ -76,6 +76,9 @@ export default function Sidebar({
   onHideLayer,
   onOpenDashboard,
   onOpenClientDashboard,
+  onOpenClientVisualization,
+  onOpenSmartCluster,
+  onOpenSmartSoil,
   onOpenUserManagement,
   onUploadLote,
   onUploadRaster,
@@ -206,6 +209,27 @@ export default function Sidebar({
             >
               PS
             </button>
+            <button
+              role="tab"
+              aria-selected={panelOpen && activeTab === "smart"}
+              className={panelOpen && activeTab === "smart" ? "active" : ""}
+              onClick={() => {
+                setActiveTab("smart");
+                setPanelOpen(true);
+                setLayersPanelOpen(false);
+              }}
+            >
+              Smart
+            </button>
+            <button
+              type="button"
+              className="layers-dashboard-btn"
+              onClick={() => onOpenDashboard?.()}
+              disabled={loading || !projectId}
+              title={!projectId ? "Seleccione un proyecto para abrir dashboard" : "Abrir dashboard"}
+            >
+              Dashboard
+            </button>
           </>
         ) : null}
         {canShowClientDashboardTab ? (
@@ -245,8 +269,6 @@ export default function Sidebar({
           onToggleVisibility={onToggleVisibility}
           onZoomToLayer={onZoomToLayer}
           onHideLayer={onHideLayer}
-          onOpenDashboard={onOpenDashboard}
-          dashboardDisabled={!token || !projectId || userRole !== "admin"}
         />
       ) : null}
 
@@ -368,6 +390,15 @@ export default function Sidebar({
             title="Abrir dashboard con resultados publicados"
           >
             Abrir dashboard de resultados
+          </button>
+          <button
+            type="button"
+            className="layers-dashboard-btn"
+            onClick={() => onOpenClientVisualization?.()}
+            disabled={loading || !projectId}
+            title={!projectId ? "Seleccione un proyecto en la lista" : "Abrir visualización Sentinel-1, Sentinel-2 y alta resolución"}
+          >
+            Ver
           </button>
           <ProjectList
             projects={projects}
@@ -495,6 +526,29 @@ export default function Sidebar({
           pipelineVariant="ps"
           onPsPlanetExtract={onPsPlanetExtract}
         />
+      ) : null}
+
+      {canShowAdminTabs && panelOpen && !layersPanelOpen && activeTab === "smart" ? (
+        <>
+          <button
+            type="button"
+            className="layers-dashboard-btn"
+            onClick={() => onOpenSmartCluster?.()}
+            disabled={loading || !projectId}
+            title={!projectId ? "Seleccione un proyecto en la lista" : "Generar/ver clusters Smart guardados"}
+          >
+            Smart Cluster
+          </button>
+          <button
+            type="button"
+            className="layers-dashboard-btn"
+            onClick={() => onOpenSmartSoil?.()}
+            disabled={loading || !projectId}
+            title={!projectId ? "Seleccione un proyecto en la lista" : "Abrir Smart Soil"}
+          >
+            Smart Soil
+          </button>
+        </>
       ) : null}
 
       {message && (

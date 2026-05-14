@@ -18,9 +18,12 @@ import {
 import Sidebar from "./components/Sidebar";
 import MapView from "./components/MapView";
 import AdvancedDashboard from "./components/dashboard/AdvancedDashboard";
+import SmartClusterModal from "./components/dashboard/SmartClusterModal";
+import SmartSoilModal from "./components/dashboard/SmartSoilModal";
 import UserManagementModal from "./components/UserManagementModal";
 import StudyRequestModal from "./components/StudyRequestModal";
 import AdminStudyOrdersModal from "./components/AdminStudyOrdersModal";
+import ClientVisualizationModal from "./components/ClientVisualizationModal";
 import { INDEX_CATALOG, INDEX_CATALOG_PS } from "./components/PreprocessPanel";
 
 const INDEX_IDS_S2 = new Set(
@@ -88,12 +91,16 @@ export default function App() {
   const [clusterElbowResultsS1, setClusterElbowResultsS1] = useState(null);
   const [clusterGmmResultsS1, setClusterGmmResultsS1] = useState(null);
   const [dashboardOpen, setDashboardOpen] = useState(false);
+  const [smartClusterOpen, setSmartClusterOpen] = useState(false);
+  const [smartSoilOpen, setSmartSoilOpen] = useState(false);
   const [userMgmtOpen, setUserMgmtOpen] = useState(false);
   const [authStep, setAuthStep] = useState("email");
   const [pendingRegEmail, setPendingRegEmail] = useState("");
   const [otpDebug, setOtpDebug] = useState(null);
   const [studyRequestOpen, setStudyRequestOpen] = useState(false);
   const [studyOrdersOpen, setStudyOrdersOpen] = useState(false);
+  const [clientVizModalOpen, setClientVizModalOpen] = useState(false);
+  const [smartFocus, setSmartFocus] = useState("cluster");
   const [studyDraw, setStudyDraw] = useState(null);
   const normalizedUserRole = normalizeUserRole(userRole);
   const isAdmin = normalizedUserRole === "admin";
@@ -131,9 +138,12 @@ export default function App() {
     setRecorteKind("");
     setPsExtractTaskId("");
     setDashboardOpen(false);
+    setSmartClusterOpen(false);
+    setSmartSoilOpen(false);
     setUserMgmtOpen(false);
     setStudyRequestOpen(false);
     setStudyOrdersOpen(false);
+    setClientVizModalOpen(false);
     setStudyDraw(null);
   }, [projectId]);
 
@@ -148,6 +158,12 @@ export default function App() {
       );
     }
   }, [sidebarTab]);
+
+  useEffect(() => {
+    if (stackMode === "visual-s1-vh" || stackMode === "visual-s1-index") {
+      setStackMode("visual-s1-vv");
+    }
+  }, [stackMode]);
 
   useEffect(() => {
     const { access, refresh } = loadStoredAuth();
@@ -1422,6 +1438,10 @@ export default function App() {
     const p = projects.find((x) => Number(x.id) === Number(projectId));
     return p?.status;
   }, [projects, projectId]);
+  const dashboardProjectName = useMemo(() => {
+    const p = projects.find((x) => Number(x.id) === Number(projectId));
+    return p?.name || "";
+  }, [projects, projectId]);
 
   return (
     <div className="layout">
@@ -1476,8 +1496,9 @@ export default function App() {
         onZoomToLayer={zoomToLayer}
         onHideLayer={(lid) => setLayerVisibility(lid, false)}
         onOpenDashboard={() => {
-          if (!isAdmin) {
-            setMessage("Acceso restringido: dashboard avanzado solo para admin.");
+          if (token) fetchProjects(token);
+          if (!projectId) {
+            setMessage("Seleccione un proyecto publicado para abrir el dashboard de resultados.");
             return;
           }
           setDashboardOpen(true);
@@ -1489,6 +1510,21 @@ export default function App() {
             return;
           }
           setDashboardOpen(true);
+        }}
+        onOpenClientVisualization={() => setClientVizModalOpen(true)}
+        onOpenSmartCluster={() => {
+          if (!isAdmin) {
+            setMessage("Acceso restringido: Smart solo para admin.");
+            return;
+          }
+          setSmartClusterOpen(true);
+        }}
+        onOpenSmartSoil={() => {
+          if (!isAdmin) {
+            setMessage("Acceso restringido: Smart solo para admin.");
+            return;
+          }
+          setSmartSoilOpen(true);
         }}
         onOpenUserManagement={() => {
           if (!isAdmin) {
@@ -1567,8 +1603,31 @@ export default function App() {
         onClose={() => setDashboardOpen(false)}
         token={token}
         projectId={projectId}
+        projectName={dashboardProjectName}
         isCliente={isCliente}
+        initialSmartFocus={smartFocus}
         projectStatus={dashboardProjectStatus}
+      />
+      <SmartClusterModal
+        open={smartClusterOpen && !!token && !!projectId && isAdmin}
+        onClose={() => setSmartClusterOpen(false)}
+        token={token}
+        projectId={projectId}
+        projectName={dashboardProjectName}
+      />
+      <SmartSoilModal
+        open={smartSoilOpen && !!token && !!projectId && isAdmin}
+        onClose={() => setSmartSoilOpen(false)}
+        token={token}
+        projectId={projectId}
+        projectName={dashboardProjectName}
+      />
+      <ClientVisualizationModal
+        open={clientVizModalOpen && isCliente && !!token}
+        onClose={() => setClientVizModalOpen(false)}
+        token={token}
+        projectId={projectId}
+        onStatusMessage={setMessage}
       />
       <UserManagementModal
         open={userMgmtOpen && isAdmin}

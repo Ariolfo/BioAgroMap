@@ -551,3 +551,13 @@ class ProcessingLogEntry(BaseModel):
     status: str
     details: dict = Field(default_factory=dict)
     created_at: str
+
+
+class PurgeS2L2aRecortesBody(BaseModel):
+    """Borrar capas raster de la galería RGB S2 cuya fecha de escena coincide (ISO YYYY-MM-DD)."""
+
+    s2_sort_keys: list[str] = Field(
+        ...,
+        min_length=1,
+        description="Fechas ISO de escena (p. ej. 2026-01-06). Se detectan por s2_sort_key, ruta .tif, s2_date_label o nombre dd/mm/aaaa_clip.",
+    )

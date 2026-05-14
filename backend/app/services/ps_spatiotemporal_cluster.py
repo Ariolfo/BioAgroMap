@@ -40,6 +40,7 @@ N_FEATURE_BANDS = 7
 class PsStClusterPreset:
     id: str
     output_subdir: str
+    legacy_output_subdirs: tuple[str, ...]
     required_keys: tuple[str, ...]
     """Índice del que se calculan mean, std y min temporal."""
     primary_key: str
@@ -50,21 +51,24 @@ class PsStClusterPreset:
 PRESETS: dict[str, PsStClusterPreset] = {
     "smart1": PsStClusterPreset(
         id="smart1",
-        output_subdir="ps_st_cluster",
+        output_subdir="smart_cluster/smart1",
+        legacy_output_subdirs=("ps_st_cluster",),
         required_keys=("NDVI", "NDRE", "NDWI", "VARI"),
         primary_key="NDVI",
         secondary_key="NDRE",
     ),
     "smart2": PsStClusterPreset(
         id="smart2",
-        output_subdir="ps_st_cluster_smart2",
+        output_subdir="smart_cluster/smart2",
+        legacy_output_subdirs=("ps_st_cluster_smart2",),
         required_keys=("EVI", "NDRE", "NDWI", "VARI"),
         primary_key="EVI",
         secondary_key="NDRE",
     ),
     "smart3": PsStClusterPreset(
         id="smart3",
-        output_subdir="ps_st_cluster_smart3",
+        output_subdir="smart_cluster/smart3",
+        legacy_output_subdirs=("ps_st_cluster_smart3",),
         required_keys=("KNDVI", "MCARI", "NDWI", "VARI"),
         primary_key="KNDVI",
         secondary_key="MCARI",

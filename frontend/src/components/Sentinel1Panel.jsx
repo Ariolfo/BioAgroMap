@@ -168,6 +168,7 @@ export default function Sentinel1Panel({
   useEffect(() => {
     if (stackMode === "visual-rgb") setStackMode("visual-s1-vv");
     else if (stackMode === "visual-index") setStackMode("visual-s1-sar-indices");
+    else if (stackMode === "visual-s1-vh" || stackMode === "visual-s1-index") setStackMode("visual-s1-vv");
   }, [stackMode, setStackMode]);
 
   useEffect(() => {
@@ -286,9 +287,7 @@ export default function Sentinel1Panel({
           onChange={(e) => setStackMode(e.target.value)}
           disabled={busy}
         >
-          <option value="visual-s1-vv">Visual VV</option>
-          <option value="visual-s1-vh">Visual VH</option>
-          <option value="visual-s1-index">Visual índice S1</option>
+          <option value="visual-s1-vv">Visual VV/VH</option>
           <option value="visual-s1-sar-indices">Visual índices SAR (serie temporal)</option>
           <option value="visual-cluster">Visual cluster</option>
         </select>
@@ -305,14 +304,10 @@ export default function Sentinel1Panel({
         disabled={!projectId || !token || loading || s1ClusterLoadingPersisted}
       >
         {stackMode === "visual-s1-vv"
-          ? "Abrir galería VV"
-          : stackMode === "visual-s1-vh"
-            ? "Abrir galería VH"
-            : stackMode === "visual-s1-index"
-              ? "Abrir galería índice S1 (VH/VV)"
-              : stackMode === "visual-s1-sar-indices"
-                ? "Abrir galería de índices SAR (serie temporal)"
-                : "Abrir visualización de clusters GMM"}
+          ? "Abrir galería VV/VH"
+          : stackMode === "visual-s1-sar-indices"
+            ? "Abrir galería de índices SAR (serie temporal)"
+            : "Abrir visualización de clusters GMM"}
       </button>
       {s1ClusterPeekHint ? (
         <p className="prepro-hint" role="status">

@@ -118,6 +118,60 @@ export const INDEX_CATALOG_PS = [
   },
 ];
 
+function isoDateFromClusterResult(row) {
+  const haystack = [
+    row?.output_basename,
+    row?.source_basename,
+    row?.label,
+    row?.key,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const isoLike = haystack.match(/(\d{4})[-_]?(\d{2})[-_]?(\d{2})/);
+  if (isoLike) {
+    const [, y, m, d] = isoLike;
+    return `${y}-${m}-${d}`;
+  }
+  const shortLike = haystack.match(/(\d{2})[-/](\d{2})[-/](\d{2})/);
+  if (shortLike) {
+    const [, d, m, yy] = shortLike;
+    return `20${yy}-${m}-${d}`;
+  }
+  return null;
+}
+
+function formatIsoToDdMmYyyy(iso) {
+  if (!iso || !/^\d{4}-\d{2}-\d{2}$/.test(iso)) return "";
+  const [y, m, d] = iso.split("-");
+  return `${d}/${m}/${y}`;
+}
+
+function clusterMultibandTitle(row, pipelineVariant) {
+  const base = row?.output_basename ?? row?.key ?? "—";
+  if (pipelineVariant !== "s2") return base;
+  const iso = isoDateFromClusterResult(row);
+  const ddmmyyyy = formatIsoToDdMmYyyy(iso);
+  return ddmmyyyy ? `${base} · ${ddmmyyyy}` : base;
+}
+
+function sortClusterResultsByDate(rows) {
+  return [...rows].sort((a, b) => {
+    const da = isoDateFromClusterResult(a);
+    const db = isoDateFromClusterResult(b);
+    if (da && db) {
+      const c = da.localeCompare(db);
+      if (c !== 0) return c;
+    } else if (da) {
+      return -1;
+    } else if (db) {
+      return 1;
+    }
+    return String(a?.output_basename || a?.key || "").localeCompare(
+      String(b?.output_basename || b?.key || "")
+    );
+  });
+}
+
 function formatFileSize(bytes) {
   if (bytes == null || !Number.isFinite(Number(bytes))) return "";
   const n = Number(bytes);
@@ -395,8 +449,12 @@ export default function PreprocessPanel({
 
   const gmmIndexResults =
     clusterGmmResults?.results?.filter((r) => r.kind === "index") ?? [];
-  const gmmMultibandResults =
+  const gmmMultibandResultsRaw =
     clusterGmmResults?.results?.filter((r) => r.kind === "multiband") ?? [];
+  const gmmMultibandResults =
+    pipelineVariant === "s2"
+      ? sortClusterResultsByDate(gmmMultibandResultsRaw)
+      : gmmMultibandResultsRaw;
 
   async function openClusterGmmResultsOrHint() {
     if (clusterGmmResults?.results?.length) {
@@ -1103,7 +1161,7 @@ export default function PreprocessPanel({
                     {gmmIndexResults.map((r) => (
                       <div key={r.key} className="cluster-gmm-tile">
                         <h5 className="cluster-gmm-tile-title">
-                          <code>{r.output_basename ?? r.key}</code>
+                          <code>{clusterMultibandTitle(r, pipelineVariant)}</code>
                           <span className="cluster-gmm-k"> · K={r.k_used ?? "—"}</span>
                         </h5>
                         <p className="cluster-meta">{r.label}</p>
@@ -1127,7 +1185,11 @@ export default function PreprocessPanel({
 
               {gmmMultibandResults.length ? (
                 <>
-                  <h4 className="cluster-results-section-title">Recortes multibanda (6+ bandas)</h4>
+                  <h4 className="cluster-results-section-title">
+                    {pipelineVariant === "s2"
+                      ? "Recortes multibanda (4 bandas originales)"
+                      : "Recortes multibanda (6+ bandas)"}
+                  </h4>
                   <div className="cluster-gmm-grid">
                     {gmmMultibandResults.map((r) => (
                       <div key={r.key} className="cluster-gmm-tile">
@@ -1172,13 +1234,11 @@ export default function PreprocessPanel({
               ? "index"
               : stackMode === "visual-s1-sar-indices"
                 ? "s1-sar-index"
-                : stackMode === "visual-s1-vv"
+                : stackMode === "visual-s1-vv" ||
+                    stackMode === "visual-s1-vh" ||
+                    stackMode === "visual-s1-index"
                   ? "s1-vv"
-                  : stackMode === "visual-s1-vh"
-                    ? "s1-vh"
-                    : stackMode === "visual-s1-index"
-                      ? "s1-index"
-                      : "rgb"
+                  : "rgb"
         }
         indexCatalog={pipelineVariant === "ps" ? INDEX_CATALOG_PS : INDEX_CATALOG}
         selectedIndices={selectedIndices}
