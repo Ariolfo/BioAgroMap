@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import api, { API_URL, formatApiErrorDetail, loadStoredAuth, setAuthToken } from "../../api";
 import SensorTimelapseViewer from "./SensorTimelapseViewer";
+import ClientSoilViewModal from "./ClientSoilViewModal";
 import DemRoiEditor, { defaultRoi, soilRoiToQueryParam } from "./DemRoiEditor";
 import VegetationTimeSeriesCharts from "../VegetationTimeSeriesCharts";
 import ClimateTimeSeriesChart from "./ClimateTimeSeriesChart";
+import DashboardIaAnalysisModal, { DigitalBrainIcon } from "./DashboardIaAnalysisModal";
 
 const SENSOR_META = {
   s1: { title: "Sentinel-1", variant: "s1", defaultIndex: "RVI" },
@@ -348,6 +350,7 @@ export default function AdvancedDashboard({
   isCliente = false,
   initialSmartFocus = "cluster",
   projectStatus,
+  onOpenClientVisualization,
 }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -386,6 +389,12 @@ export default function AdvancedDashboard({
   const [psStCluster3Preview, setPsStCluster3Preview] = useState("");
   const [psStCluster3Busy, setPsStCluster3Busy] = useState(false);
   const [psStCluster3Error, setPsStCluster3Error] = useState("");
+  /** Slot del cluster cuyo panel «Índices usados» está abierto (1, 2, 3 o null). */
+  const [openClusterInfo, setOpenClusterInfo] = useState(null);
+  const [iaReportOpen, setIaReportOpen] = useState(false);
+  /** Popover «¿Qué es AGRO Geofísica?» en la cabecera de la sección. */
+  const [geofisicaInfoOpen, setGeofisicaInfoOpen] = useState(false);
+  const [geofisicaZoomOpen, setGeofisicaZoomOpen] = useState(false);
   const [soilPlusOpen, setSoilPlusOpen] = useState(false);
   const [soilPlusBusy, setSoilPlusBusy] = useState(false);
   const [soilPlusError, setSoilPlusError] = useState("");
@@ -426,6 +435,36 @@ export default function AdvancedDashboard({
     const n = String(projectStatus).trim().toLowerCase().replace(/\s+/g, " ");
     return n !== "publicado";
   }, [isCliente, projectStatus]);
+
+  /**
+   * Hay resultados Smart Soil persistidos (Fast o Mat) cuando alguna variante tiene `saved_at`
+   * o al menos una imagen DEM/CV/FCM cargada. En ese caso ocultamos el placeholder de la
+   * sección «AGRO Geofísica» y mostramos los resultados; sin resultados, solo el placeholder.
+   */
+  const hasGeofisicaResults = useMemo(() => {
+    const variants = ["fast", "matlab"];
+    for (const vk of variants) {
+      if (clientSoilSummary?.[vk]?.saved_at) return true;
+      const urls = clientSoilImgUrls?.[vk] || {};
+      if (Object.values(urls).some((u) => !!u)) return true;
+    }
+    return false;
+  }, [clientSoilSummary, clientSoilImgUrls]);
+
+  const clientSoilZoomInitialVariant = useMemo(() => {
+    if (clientSoilSummary?.fast) return "fast";
+    if (clientSoilSummary?.matlab) return "matlab";
+    const hasFast = Object.values(clientSoilImgUrls?.fast || {}).some(Boolean);
+    if (hasFast) return "fast";
+    return "matlab";
+  }, [clientSoilSummary, clientSoilImgUrls]);
+
+  useEffect(() => {
+    if (!open) {
+      setGeofisicaZoomOpen(false);
+      setGeofisicaInfoOpen(false);
+    }
+  }, [open]);
 
   const frameFor = (sensor) => {
     const sd = sensorData[sensor];
@@ -1150,6 +1189,55 @@ export default function AdvancedDashboard({
 
   const activeCluster = (clusterBySensor[sensorActive] || []).find((c) => c.key === selectedClusterKey[sensorActive]);
 
+  const iaContext = useMemo(() => {
+    const sd = sensorData[sensorActive];
+    const idxKey = sd ? indexBySensor[sensorActive] || sd.indices?.[0] : null;
+    const frames = sd && idxKey ? sd.framesByIndex[idxKey] || [] : [];
+    const af = frames[dateIdxBySensor[sensorActive]] || null;
+    return {
+      projectId,
+      projectName,
+      sensorData,
+      indexBySensor,
+      seriesBySensor,
+      climateBySensor,
+      clusterBySensor,
+      psStClusters: {
+        1: { preview: !!psStCluster1Preview, busy: psStCluster1Busy, error: psStCluster1Error },
+        2: { preview: !!psStCluster2Preview, busy: psStCluster2Busy, error: psStCluster2Error },
+        3: { preview: !!psStCluster3Preview, busy: psStCluster3Busy, error: psStCluster3Error },
+      },
+      clientSoilSummary,
+      hasGeofisica: hasGeofisicaResults,
+      soilDemInfo,
+      activeSceneDate: af?.date ?? null,
+      activeSensorKey: sensorActive,
+      activeIndexKey: indexBySensor[sensorActive] ?? "",
+    };
+  }, [
+    projectId,
+    projectName,
+    sensorData,
+    indexBySensor,
+    seriesBySensor,
+    climateBySensor,
+    clusterBySensor,
+    psStCluster1Preview,
+    psStCluster1Busy,
+    psStCluster1Error,
+    psStCluster2Preview,
+    psStCluster2Busy,
+    psStCluster2Error,
+    psStCluster3Preview,
+    psStCluster3Busy,
+    psStCluster3Error,
+    clientSoilSummary,
+    hasGeofisicaResults,
+    soilDemInfo,
+    sensorActive,
+    dateIdxBySensor,
+  ]);
+
   const handleMediaMouseMove = () => {};
 
   const handleMediaMouseDown = () => {};
@@ -1176,11 +1264,12 @@ export default function AdvancedDashboard({
 
   const s = sensorActive;
   return (
+    <>
     <div className="adv-dashboard-overlay" role="dialog" aria-modal="true" aria-label="BioAgroMap, dashboard multisensor espectral-espacio-temporal">
       <div className="adv-dashboard-backdrop" onClick={onClose} />
       <div className="adv-dashboard-window">
         <div className="adv-dashboard-header">
-          <h2>BioAgroMap -> Dashboard multisensor Espectral-Espacio-Temporal</h2>
+          <h2>BioAgroMap → Dashboard multisensor Espectral-Espacio-Temporal</h2>
           <span className="adv-dashboard-project-pill">
             Proyecto: {projectName || `ID ${projectId || "—"}`}
           </span>
@@ -1290,6 +1379,7 @@ export default function AdvancedDashboard({
                 }
                 opacity={opacityBySensor[s]}
                 onOpacity={(v) => setOpacityBySensor((p) => ({ ...p, [s]: v }))}
+                onOpenClientVisualization={onOpenClientVisualization}
                 interactive
                 roiMode={roiMode}
                 onToggleRoi={() => setRoiMode((v) => !v)}
@@ -1299,6 +1389,12 @@ export default function AdvancedDashboard({
                 roiSelection={roiSelection}
                 clusterPreviewB64={activeCluster?.preview_png_base64 || null}
                 clusterVisible={clusterVisible}
+                onToggleClusterVisible={(v) => setClusterVisible(!!v)}
+                clusterOptions={clusterBySensor[sensorActive] || []}
+                selectedClusterKey={selectedClusterKey[sensorActive] || ""}
+                onChangeClusterKey={(k) =>
+                  setSelectedClusterKey((p) => ({ ...p, [sensorActive]: k }))
+                }
                 onMediaMouseMove={handleMediaMouseMove}
                 onMediaMouseDown={handleMediaMouseDown}
                 onMediaMouseUp={handleMediaMouseUp}
@@ -1307,55 +1403,115 @@ export default function AdvancedDashboard({
             </div>
             <section className="adv-timelapse-geofisica" aria-label="Geofísica y modelado de suelo">
               <div className="adv-timelapse-geofisica-head">
-                <h3 className="adv-timelapse-geofisica-title">AGRO Geofisica - Modelado del suelo agricola</h3>
-                <span className="adv-smart-cluster-msg">Solo visualizacion en dashboard.</span>
-              </div>
-              <div className="adv-timelapse-geofisica-frame">
-                <img
-                  src={`${import.meta.env.BASE_URL}dashboard-geofisica-modelado-suelo.png`}
-                  alt="Modelado geofísico del suelo agrícola"
-                />
-              </div>
-              <div className="adv-geofisica-soil-head">
-                <h4 className="adv-geofisica-soil-title">Smart Soil — resultados guardados (Fast / Mat)</h4>
+                <div className="adv-timelapse-geofisica-title-wrap">
+                  <h3 className="adv-timelapse-geofisica-title">AGRO Geofisica - Modelado del suelo agricola</h3>
+                  <button
+                    type="button"
+                    className={`adv-smart-cluster-info-btn${geofisicaInfoOpen ? " is-open" : ""}`}
+                    aria-label="Información sobre AGRO Geofísica"
+                    aria-expanded={geofisicaInfoOpen}
+                    aria-controls="adv-geofisica-info-pop"
+                    title="¿Qué muestra esta sección?"
+                    onClick={() => setGeofisicaInfoOpen((v) => !v)}
+                  >
+                    i
+                  </button>
+                  {geofisicaInfoOpen ? (
+                    <div
+                      id="adv-geofisica-info-pop"
+                      className="adv-smart-cluster-info-pop adv-geofisica-info-pop"
+                      role="dialog"
+                      aria-label="Información sobre AGRO Geofísica"
+                    >
+                      <div className="adv-smart-cluster-info-pop-head">
+                        <strong>Smart Soil — resultados guardados (Fast / Mat)</strong>
+                        <button
+                          type="button"
+                          className="adv-smart-cluster-info-close"
+                          aria-label="Cerrar"
+                          onClick={() => setGeofisicaInfoOpen(false)}
+                        >
+                          ×
+                        </button>
+                      </div>
+                      <p className="adv-geofisica-info-text">
+                        Mapas DEM / CV / FCM persistidos tras ejecutar Fast o Mat desde el editor. Solo visualización en dashboard.
+                      </p>
+                    </div>
+                  ) : null}
+                  {hasGeofisicaResults ? (
+                    <button
+                      type="button"
+                      className="adv-geofisica-zoom-btn"
+                      onClick={() => setGeofisicaZoomOpen(true)}
+                      title="Ampliar vista Smart Soil (solo lectura, como tras Ejecutar en el editor admin)"
+                    >
+                      <svg
+                        className="adv-geofisica-zoom-icon"
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.2"
+                        strokeLinecap="round"
+                        aria-hidden
+                      >
+                        <circle cx="10" cy="10" r="6" />
+                        <path d="M16 16l6 6" />
+                      </svg>
+                      Zoom
+                    </button>
+                  ) : null}
+                </div>
                 {isAdminView ? (
                   <button type="button" className="adv-soilplus-btn" onClick={() => setSoilPlusOpen(true)}>
                     Editor Soil+
                   </button>
                 ) : null}
               </div>
-              <div className="adv-smart-soil-dashboard">
-                <p className="adv-smart-cluster-msg">
-                  Mapas DEM / CV / FCM persistidos tras &quot;Ejecutar Fast&quot; o &quot;Ejecutar Mat&quot; desde el editor. El cliente solo ve estos resultados cuando el
-                  proyecto está publicado y el equipo ha ejecutado y guardado el flujo.
-                </p>
-                {(["fast", "matlab"]).map((vk) => (
-                  <div key={vk} className="adv-smart-soil-variant">
-                    <h5 className="adv-smart-cluster-heading">{vk === "fast" ? "Fast (CVE rápido, guardado)" : "Mat (CV tipo MATLAB, guardado)"}</h5>
-                    {clientSoilSummary?.[vk]?.saved_at ? (
-                      <p className="adv-soilplus-dem-meta">
-                        Guardado {String(clientSoilSummary[vk].saved_at)}
-                        {" · "}
-                        muestras {clientSoilSummary[vk]?.total_samples_placed ?? "—"} / objetivo {clientSoilSummary[vk]?.total_samples ?? "—"}
-                        {" · K="}
-                        {clientSoilSummary[vk]?.n_clusters ?? "—"}
-                      </p>
-                    ) : (
-                      <p className="adv-smart-cluster-msg">Sin archivo guardado para esta variante todavía.</p>
-                    )}
-                    <div className="adv-smart-soil-thumbs">
-                      {(["dem", "cv", "fcm"]).map((kind) =>
-                        clientSoilImgUrls?.[vk]?.[kind] ? (
-                          <div key={`${vk}-${kind}`} className="adv-smart-soil-thumb-cell">
-                            <span className="adv-smart-soil-thumb-label">{kind.toUpperCase()}</span>
-                            <img className="adv-smart-soil-thumb-img" src={clientSoilImgUrls[vk][kind]} alt={`${vk} ${kind}`} />
-                          </div>
-                        ) : null
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
+              {!hasGeofisicaResults ? (
+                <div className="adv-timelapse-geofisica-frame">
+                  <img
+                    src={`${import.meta.env.BASE_URL}dashboard-geofisica-modelado-suelo.png`}
+                    alt="Modelado geofísico del suelo agrícola"
+                  />
+                </div>
+              ) : null}
+              {hasGeofisicaResults ? (
+                <div className="adv-smart-soil-dashboard">
+                  {(["fast", "matlab"]).map((vk) => {
+                    const variantHasData =
+                      !!clientSoilSummary?.[vk]?.saved_at ||
+                      Object.values(clientSoilImgUrls?.[vk] || {}).some((u) => !!u);
+                    if (!variantHasData) return null;
+                    return (
+                      <div key={vk} className="adv-smart-soil-variant">
+                        <h5 className="adv-smart-cluster-heading">{vk === "fast" ? "Fast (CVE rápido, guardado)" : "Mat (CV tipo MATLAB, guardado)"}</h5>
+                        {clientSoilSummary?.[vk]?.saved_at ? (
+                          <p className="adv-soilplus-dem-meta">
+                            Guardado {String(clientSoilSummary[vk].saved_at)}
+                            {" · "}
+                            muestras {clientSoilSummary[vk]?.total_samples_placed ?? "—"} / objetivo {clientSoilSummary[vk]?.total_samples ?? "—"}
+                            {" · K="}
+                            {clientSoilSummary[vk]?.n_clusters ?? "—"}
+                          </p>
+                        ) : null}
+                        <div className="adv-smart-soil-thumbs">
+                          {(["dem", "cv", "fcm"]).map((kind) =>
+                            clientSoilImgUrls?.[vk]?.[kind] ? (
+                              <div key={`${vk}-${kind}`} className="adv-smart-soil-thumb-cell">
+                                <span className="adv-smart-soil-thumb-label">{kind.toUpperCase()}</span>
+                                <img className="adv-smart-soil-thumb-img" src={clientSoilImgUrls[vk][kind]} alt={`${vk} ${kind}`} />
+                              </div>
+                            ) : null
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
             </section>
           </div>
 
@@ -1367,6 +1523,7 @@ export default function AdvancedDashboard({
                     data={seriesBySensor[sensorActive]}
                     onlyIndexKey={indexBySensor[sensorActive]}
                     activeSceneDate={frameFor(sensorActive)?.date || null}
+                    chartPixelHeight={300}
                   />
                 ) : (
                   <p className="adv-series-empty">Sin serie para este sensor.</p>
@@ -1376,6 +1533,7 @@ export default function AdvancedDashboard({
                     data={climateBySensor[sensorActive]}
                     activeVars={climateVars}
                     activeSceneDate={frameFor(sensorActive)?.date || null}
+                    chartHeight={252}
                   />
                 </div>
                 <div className="adv-climate-toggles adv-climate-toggles--compact">
@@ -1398,63 +1556,97 @@ export default function AdvancedDashboard({
               </div>
               <section className="adv-smart-clusters-panel" aria-label="Smart Agro dashboard">
                 <div className="adv-smart-clusters-grid">
-                  <div className="adv-smart-cluster-cell">
-                    <h4 className="adv-smart-cluster-heading">cluster Smart 1</h4>
-                    <div className="adv-smart-cluster-frame">
-                      {psStCluster1Error ? (
-                        <p className="adv-smart-cluster-msg adv-smart-cluster-msg--err">{psStCluster1Error}</p>
-                      ) : null}
-                      {psStCluster1Busy ? (
-                        <p className="adv-smart-cluster-msg">Calculando cluster…</p>
-                      ) : psStCluster1Preview ? (
-                        <img
-                          className="adv-smart-cluster-map"
-                          src={psStCluster1Preview}
-                          alt="Mapa clusters PS preset NDVI, NDRE, NDWI, VARI"
-                        />
-                      ) : (
-                        <p className="adv-smart-cluster-msg">Sin mapa (índices NDVI, NDRE, NDWI, VARI en indecesPS).</p>
-                      )}
-                    </div>
-                  </div>
-                  <div className="adv-smart-cluster-cell">
-                    <h4 className="adv-smart-cluster-heading">cluster Smart 2</h4>
-                    <div className="adv-smart-cluster-frame">
-                      {psStCluster2Error ? (
-                        <p className="adv-smart-cluster-msg adv-smart-cluster-msg--err">{psStCluster2Error}</p>
-                      ) : null}
-                      {psStCluster2Busy ? (
-                        <p className="adv-smart-cluster-msg">Calculando cluster…</p>
-                      ) : psStCluster2Preview ? (
-                        <img
-                          className="adv-smart-cluster-map"
-                          src={psStCluster2Preview}
-                          alt="Mapa clusters PS preset EVI, NDRE, NDWI, VARI"
-                        />
-                      ) : (
-                        <p className="adv-smart-cluster-msg">Sin mapa (requiere EVI y resto en indecesPS).</p>
-                      )}
-                    </div>
-                  </div>
-                  <div className="adv-smart-cluster-cell">
-                    <h4 className="adv-smart-cluster-heading">cluster Smart 3</h4>
-                    <div className="adv-smart-cluster-frame">
-                      {psStCluster3Error ? (
-                        <p className="adv-smart-cluster-msg adv-smart-cluster-msg--err">{psStCluster3Error}</p>
-                      ) : null}
-                      {psStCluster3Busy ? (
-                        <p className="adv-smart-cluster-msg">Calculando cluster…</p>
-                      ) : psStCluster3Preview ? (
-                        <img
-                          className="adv-smart-cluster-map"
-                          src={psStCluster3Preview}
-                          alt="Mapa clusters PS preset KNDVI, MCARI, NDWI, VARI"
-                        />
-                      ) : (
-                        <p className="adv-smart-cluster-msg">Sin mapa (KNDVI, MCARI, NDWI, VARI en indecesPS).</p>
-                      )}
-                    </div>
-                  </div>
+                  {[
+                    {
+                      slot: 1,
+                      title: "cluster Smart 1",
+                      indices: ["NDVI", "NDRE", "NDWI", "VARI"],
+                      preview: psStCluster1Preview,
+                      busy: psStCluster1Busy,
+                      error: psStCluster1Error,
+                      emptyMsg: "Sin mapa (índices NDVI, NDRE, NDWI, VARI en indecesPS).",
+                    },
+                    {
+                      slot: 2,
+                      title: "cluster Smart 2",
+                      indices: ["EVI", "NDRE", "NDWI", "VARI"],
+                      preview: psStCluster2Preview,
+                      busy: psStCluster2Busy,
+                      error: psStCluster2Error,
+                      emptyMsg: "Sin mapa (requiere EVI y resto en indecesPS).",
+                    },
+                    {
+                      slot: 3,
+                      title: "cluster Smart 3",
+                      indices: ["KNDVI", "MCARI", "NDWI", "VARI"],
+                      preview: psStCluster3Preview,
+                      busy: psStCluster3Busy,
+                      error: psStCluster3Error,
+                      emptyMsg: "Sin mapa (KNDVI, MCARI, NDWI, VARI en indecesPS).",
+                    },
+                  ].map((c) => {
+                    const infoOpen = openClusterInfo === c.slot;
+                    const infoId = `adv-smart-cluster-info-${c.slot}`;
+                    return (
+                      <div key={c.slot} className="adv-smart-cluster-cell">
+                        <div className="adv-smart-cluster-heading-row">
+                          <h4 className="adv-smart-cluster-heading">{c.title}</h4>
+                          <button
+                            type="button"
+                            className={`adv-smart-cluster-info-btn${infoOpen ? " is-open" : ""}`}
+                            aria-label={`Ver índices usados en ${c.title}`}
+                            aria-expanded={infoOpen}
+                            aria-controls={infoId}
+                            title="Ver índices usados"
+                            onClick={() => setOpenClusterInfo((prev) => (prev === c.slot ? null : c.slot))}
+                          >
+                            i
+                          </button>
+                          {infoOpen ? (
+                            <div
+                              id={infoId}
+                              className="adv-smart-cluster-info-pop"
+                              role="dialog"
+                              aria-label={`Índices usados en ${c.title}`}
+                            >
+                              <div className="adv-smart-cluster-info-pop-head">
+                                <strong>Índices usados</strong>
+                                <button
+                                  type="button"
+                                  className="adv-smart-cluster-info-close"
+                                  aria-label="Cerrar"
+                                  onClick={() => setOpenClusterInfo(null)}
+                                >
+                                  ×
+                                </button>
+                              </div>
+                              <ul className="adv-smart-cluster-info-list">
+                                {c.indices.map((idx) => (
+                                  <li key={idx}>{idx}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          ) : null}
+                        </div>
+                        <div className="adv-smart-cluster-frame">
+                          {c.error ? (
+                            <p className="adv-smart-cluster-msg adv-smart-cluster-msg--err">{c.error}</p>
+                          ) : null}
+                          {c.busy ? (
+                            <p className="adv-smart-cluster-msg">Calculando cluster…</p>
+                          ) : c.preview ? (
+                            <img
+                              className="adv-smart-cluster-map"
+                              src={c.preview}
+                              alt={`Mapa clusters PS preset ${c.indices.join(", ")}`}
+                            />
+                          ) : (
+                            <p className="adv-smart-cluster-msg">{c.emptyMsg}</p>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               </section>
 
@@ -1463,6 +1655,24 @@ export default function AdvancedDashboard({
                   El proyecto seleccionado no tiene inventarios procesados todavía (S1/S2/PS) para mostrar en el dashboard.
                 </p>
               ) : null}
+
+              <div className="adv-ia-launch-row">
+                <button
+                  type="button"
+                  className="adv-ver-analisis-btn"
+                  disabled={clientDashboardBlocked}
+                  aria-label="Abrir informe técnico de análisis"
+                  title={
+                    clientDashboardBlocked
+                      ? "Disponible cuando el proyecto esté publicado"
+                      : "Abrir ventana con informe técnico (Planet, clusters, clima)"
+                  }
+                  onClick={() => setIaReportOpen(true)}
+                >
+                  <span className="adv-ver-analisis-label">ver analisis</span>
+                  <DigitalBrainIcon className="adv-ver-analisis-brain" size={24} />
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -1746,5 +1956,17 @@ export default function AdvancedDashboard({
         </div>
       ) : null}
     </div>
+    {iaReportOpen ? (
+      <DashboardIaAnalysisModal open={iaReportOpen} onClose={() => setIaReportOpen(false)} iaContext={iaContext} />
+    ) : null}
+    <ClientSoilViewModal
+      open={geofisicaZoomOpen}
+      onClose={() => setGeofisicaZoomOpen(false)}
+      token={effectiveToken}
+      projectId={projectId}
+      projectName={projectName}
+      initialVariant={clientSoilZoomInitialVariant}
+    />
+    </>
   );
 }

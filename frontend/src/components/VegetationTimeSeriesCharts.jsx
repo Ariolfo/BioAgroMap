@@ -269,9 +269,10 @@ function IndexChart({
   temporalStatsFromApi,
   isS1Sar = false,
   activeSceneDate = null,
+  chartHeight = 260,
 }) {
   const W = 900;
-  const H = 260;
+  const H = Number(chartHeight) > 120 ? Number(chartHeight) : 260;
   const padL = 58;
   const padR = 20;
   const padT = 16;
@@ -581,7 +582,12 @@ function IndexChart({
   );
 }
 
-export default function VegetationTimeSeriesCharts({ data, onlyIndexKey = null, activeSceneDate = null }) {
+export default function VegetationTimeSeriesCharts({
+  data,
+  onlyIndexKey = null,
+  activeSceneDate = null,
+  chartPixelHeight = null,
+}) {
   const rawPoints = data?.points?.length ? [...data.points] : [];
   const dateFallback =
     Array.isArray(data?.dates) && data.dates.length
@@ -597,6 +603,7 @@ export default function VegetationTimeSeriesCharts({ data, onlyIndexKey = null, 
         ? []
         : allKeys;
   const compact = Boolean(onlyIndexKey);
+  const resolvedChartH = compact && chartPixelHeight != null ? Number(chartPixelHeight) || 260 : 260;
 
   const pp = data?.per_pixel;
   const seriesMap = pp?.series_by_index;
@@ -642,6 +649,7 @@ export default function VegetationTimeSeriesCharts({ data, onlyIndexKey = null, 
           temporalStatsFromApi={data?.temporal_stats?.[key]}
           isS1Sar={isS1Sar}
           activeSceneDate={activeSceneDate}
+          chartHeight={resolvedChartH}
         />
       ))}
     </div>

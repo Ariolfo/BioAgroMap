@@ -13,6 +13,7 @@ from urllib.request import urlopen
 
 import numpy as np
 import rasterio
+from rasterio.enums import Resampling
 from rasterio.transform import xy
 from matplotlib import colormaps
 from matplotlib.path import Path as MplPath
@@ -897,6 +898,181 @@ def get_recortes_inventory(
         "recortes_dir": rec_kind,
         "pipeline_variant": normalize_pipeline_variant(pipeline_variant),
     }
+
+
+def _pct_stretch01(x: np.ndarray) -> np.ndarray:
+    finite = x[np.isfinite(x)]
+    if finite.size < 16:
+        return np.zeros_like(x, dtype=np.float64)
+    lo, hi = np.percentile(finite, [2.0, 98.0])
+    if hi <= lo + 1e-9:
+        return np.clip(x - lo, 0.0, 1.0)
+    return np.clip((x - lo) / (hi - lo), 0.0, 1.0)
+
+
+def _luma_laplace_var_from_rgb(r: np.ndarray, g: np.ndarray, b: np.ndarray) -> tuple[float, float]:
+    """Brillo percibencial tras estirado por percentiles y varianza del laplaciano (textura / bordes)."""
+    nr = _pct_stretch01(r.astype(np.float64))
+    ng = _pct_stretch01(g.astype(np.float64))
+    nb = _pct_stretch01(b.astype(np.float64))
+    L = 0.299 * nr + 0.587 * ng + 0.114 * nb
+    if not np.any(np.isfinite(L)):
+        return float("nan"), float("nan")
+    c = L[1:-1, 1:-1]
+    lap = L[:-2, 1:-1] + L[2:, 1:-1] + L[1:-1, :-2] + L[1:-1, 2:] - 4.0 * c
+    return float(np.mean(L[np.isfinite(L)])), float(np.var(lap[np.isfinite(lap)]))
+
+
+@router.get("/preprocess/dashboard-ia-planet-integral/{project_id}")
+def dashboard_ia_planet_integral(
+    project_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    tenant_id: int = Depends(tenant_from_jwt),
+    max_scenes: int = Query(36, ge=4, le=60, description="Máximo de escenas PS 8 bandas a analizar (lectura subsampleada)."),
+):
+    """Visión por computador subsampleada en serie: NDVI, claros, textura RGB (6-4-2) y laplaciano del brillo."""
+    from app.services.s2_vegetation_indices import sort_key_from_path_or_meta
+
+    require_project_dashboard_access(db, user, tenant_id, project_id)
+    rec_kind = recortes_dir_name("ps")
+    recortes_root = _tenant_storage(tenant_id, project_id, rec_kind)
+    if not recortes_root.is_dir():
+        return {
+            "scenes": [],
+            "summary": {"n_scenes_analyzed": 0, "message": "Sin carpeta recortesPS"},
+        }
+
+    candidates: list[tuple[str, Path]] = []
+    for p in sorted(recortes_root.rglob("*.tif")):
+        if "_cog" in p.name.lower() or not p.is_file():
+            continue
+        if not is_planetscope_ps_recorte_filename(p.name):
+            continue
+        if _safe_relative_under(recortes_root, p) is None:
+            continue
+        try:
+            with rasterio.open(p) as src:
+                if int(src.count) < 8:
+                    continue
+        except Exception:
+            continue
+        sk = sort_key_from_path_or_meta(p, None) or "1900-01-01"
+        candidates.append((str(sk), p.resolve()))
+
+    candidates.sort(key=lambda x: (x[0], str(x[1])))
+    candidates = candidates[: int(max_scenes)]
+
+    sh = sw = 256
+    rows: list[dict] = []
+    for sk, p in candidates:
+        rel = _safe_relative_under(recortes_root, p)
+        try:
+            with rasterio.open(p) as src:
+                if int(src.count) < 8:
+                    continue
+                r = src.read(6, out_shape=(sh, sw), resampling=Resampling.average).astype(np.float32)
+                ir = src.read(8, out_shape=(sh, sw), resampling=Resampling.average).astype(np.float32)
+                g = src.read(4, out_shape=(sh, sw), resampling=Resampling.average).astype(np.float32)
+                b_rgb = src.read(2, out_shape=(sh, sw), resampling=Resampling.average).astype(np.float32)
+                ndvi = (ir - r) / (ir + r + 1e-6)
+                ndvi = np.clip(ndvi, -1, 1)
+                valid = np.isfinite(ndvi)
+                if not np.any(valid):
+                    rows.append({"sort_key": sk, "basename": p.name, "relative_path": rel, "error": "sin pixeles validos"})
+                    continue
+                v = ndvi[valid]
+                gsub = g[valid]
+                gmean = float(np.mean(gsub)) + 1e-6
+                green_cv = float(np.std(gsub) / gmean)
+                luma_mean, lap_var = _luma_laplace_var_from_rgb(r, g, b_rgb)
+                rows.append(
+                    {
+                        "sort_key": sk,
+                        "basename": p.name,
+                        "relative_path": rel,
+                        "ndvi_mean": float(np.mean(v)),
+                        "ndvi_std": float(np.std(v)),
+                        "frac_low_ndvi": float(np.mean(v < 0.22)),
+                        "frac_high_ndvi": float(np.mean(v > 0.55)),
+                        "green_cv": green_cv,
+                        "rgb_luma_mean": luma_mean,
+                        "rgb_laplace_var": lap_var,
+                        "sample_hw": [int(sh), int(sw)],
+                    }
+                )
+        except Exception as exc:
+            rows.append({"sort_key": sk, "basename": p.name, "relative_path": rel, "error": str(exc)[:160]})
+
+    ok = [r for r in rows if "ndvi_mean" in r]
+    summary: dict = {"n_scenes_analyzed": len(ok), "n_paths_seen": len(candidates)}
+    narrative: list[str] = []
+    if len(ok) >= 4:
+        ok.sort(key=lambda x: x["sort_key"])
+        n = len(ok)
+        third = max(1, n // 3)
+        early = ok[:third]
+        late = ok[n - third :]
+        fl_e = float(np.mean([float(x["frac_low_ndvi"]) for x in early]))
+        fl_l = float(np.mean([float(x["frac_low_ndvi"]) for x in late]))
+        summary["frac_low_ndvi_early_mean"] = fl_e
+        summary["frac_low_ndvi_late_mean"] = fl_l
+        summary["delta_frac_low_ndvi"] = fl_l - fl_e
+        gc_e = float(np.mean([float(x["green_cv"]) for x in early]))
+        gc_l = float(np.mean([float(x["green_cv"]) for x in late]))
+        summary["green_cv_early_mean"] = gc_e
+        summary["green_cv_late_mean"] = gc_l
+        summary["delta_green_cv"] = gc_l - gc_e
+        lap_e = float(np.mean([float(x["rgb_laplace_var"]) for x in early if np.isfinite(float(x.get("rgb_laplace_var", np.nan)))]))
+        lap_l = float(np.mean([float(x["rgb_laplace_var"]) for x in late if np.isfinite(float(x.get("rgb_laplace_var", np.nan)))]))
+        if np.isfinite(lap_e) and np.isfinite(lap_l):
+            summary["rgb_laplace_early_mean"] = lap_e
+            summary["rgb_laplace_late_mean"] = lap_l
+            summary["delta_rgb_laplace"] = lap_l - lap_e
+        dfl = fl_l - fl_e
+        if dfl > 0.04:
+            narrative.append(
+                f"Proxy de claros/bajo dosel: la fracción de NDVI bajo (<0.22) en malla {sh}×{sw} **aumenta** "
+                f"del tramo inicial (μ={fl_e:.3f}) al final (μ={fl_l:.3f}); Δ≈{dfl:+.3f}. "
+                "Coherente con **más áreas despejadas o menor cobertura foliar** en escenas recientes; validar en RGB Planet."
+            )
+        elif dfl < -0.04:
+            narrative.append(
+                f"La fracción de NDVI bajo **disminuye** entre tramos (Δ≈{dfl:+.3f}), compatible con recuperación "
+                "del dosel o menor exposición de suelo en las fechas recientes."
+            )
+        else:
+            narrative.append(
+                f"Cambio moderado en fracción de NDVI bajo entre tramos (Δ≈{dfl:+.3f}). "
+                "Lucanas o huecos localizados pueden **diluirse** en el promedio agregado; la firma fina sigue apareciendo en la **secuencia RGB** escena a escena."
+            )
+        if (gc_l - gc_e) > 0.035:
+            narrative.append(
+                "Mayor variabilidad relativa del canal verde en escenas recientes sugiere **textura más irregular** "
+                "(surcos, sombras o dosel menos homogéneo) frente al inicio de la serie."
+            )
+        dlap = summary.get("delta_rgb_laplace")
+        if dlap is not None and np.isfinite(dlap):
+            if dlap > 1.2e-4:
+                narrative.append(
+                    "La energía de borde en la composición RGB (laplaciano del brillo) **sube** en el tramo reciente "
+                    "respecto al inicial: suele asociarse a **más discontinuidades finas** en el dosel (huecos, surcos, "
+                    "bordes de copas o sombras móviles), coherente con revisión RGB fecha a fecha."
+                )
+            elif dlap < -1.2e-4:
+                narrative.append(
+                    "La energía de borde RGB **baja** hacia el final de la serie: imagen algo **más suave** "
+                    "(dosel más homogéneo, atmósfera más uniforme o menor contraste escena a escena); contrastar con NDVI."
+                )
+    elif ok:
+        narrative.append(
+            f"Solo {len(ok)} escena(s) válidas para el análisis automático; la trayectoria es corta y los contrastes "
+            "temporales deben interpretarse con cautela, apoyándose en RGB e índices del dashboard fecha a fecha."
+        )
+    else:
+        narrative.append("No se pudieron calcular estadísticos NDVI en recortes PS (revisar archivos 8 bandas).")
+
+    return {"scenes": rows, "summary": summary, "narrative": narrative}
 
 
 def _load_soilplus_dem_band1(

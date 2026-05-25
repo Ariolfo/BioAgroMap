@@ -29,7 +29,7 @@ const SOIL_CLUSTER_BAR_COLORS = [
   "#f781bf",
 ];
 
-function SoilClusterSampleBars({ samples, totalSamples, clusterCount, compact = false, thumb = false }) {
+export function SoilClusterSampleBars({ samples, totalSamples, clusterCount, compact = false, thumb = false }) {
   const arr = Array.isArray(samples) ? samples : [];
   const k = Math.max(1, Number(clusterCount) || arr.length || 1);
   const total = Math.max(1, Number(totalSamples) || 1);
@@ -106,7 +106,7 @@ function SoilClusterSampleBars({ samples, totalSamples, clusterCount, compact = 
   );
 }
 
-function SoilFcmSampleTriangles({ points, viewWidth, viewHeight }) {
+export function SoilFcmSampleTriangles({ points, viewWidth, viewHeight }) {
   const w = Math.max(1, Number(viewWidth) || 1);
   const h = Math.max(1, Number(viewHeight) || 1);
   const s = Math.max(0.2, Math.min(w, h) / 880);
@@ -143,7 +143,7 @@ function SoilFcmSampleTriangles({ points, viewWidth, viewHeight }) {
   );
 }
 
-function SoilQCurveChart({ data }) {
+export function SoilQCurveChart({ data }) {
   if (!data?.k_values?.length) return <p className="adv-soilplus-image-empty">Pulsa Ejecutar.</p>;
   const pts = [];
   for (let i = 0; i < data.k_values.length; i += 1) {

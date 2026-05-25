@@ -1607,6 +1607,7 @@ export default function App() {
         isCliente={isCliente}
         initialSmartFocus={smartFocus}
         projectStatus={dashboardProjectStatus}
+        onOpenClientVisualization={isCliente ? () => setClientVizModalOpen(true) : undefined}
       />
       <SmartClusterModal
         open={smartClusterOpen && !!token && !!projectId && isAdmin}

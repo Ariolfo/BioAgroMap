@@ -142,4 +142,3 @@ pytest -q
 - Recomendada separacion en imagenes versionadas por servicio
 
 
-#cloudflared tunnel --url http://localhost:5173

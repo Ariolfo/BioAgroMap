@@ -58,7 +58,7 @@ function axisTicks(scale, n = 4) {
   return out;
 }
 
-export default function ClimateTimeSeriesChart({ data, activeVars, activeSceneDate }) {
+export default function ClimateTimeSeriesChart({ data, activeVars, activeSceneDate, chartHeight = 180 }) {
   if (!data?.length) return <p className="adv-climate-empty">Sin datos agroclimáticos.</p>;
   const enabled = ["precip", "temp", "humidity", "radiation"].filter((k) => activeVars?.[k]);
   if (!enabled.length) return <p className="adv-climate-empty">Activa al menos una variable climática.</p>;
@@ -70,7 +70,7 @@ export default function ClimateTimeSeriesChart({ data, activeVars, activeSceneDa
   const fallbackScale = leftScale || rightScale;
 
   const W = 900;
-  const H = 180;
+  const H = Number(chartHeight) > 100 ? Number(chartHeight) : 180;
   const padL = 58;
   const padR = 20;
   const padT = 16;

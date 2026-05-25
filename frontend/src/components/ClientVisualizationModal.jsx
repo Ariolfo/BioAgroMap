@@ -170,10 +170,30 @@ export default function ClientVisualizationModal({
   const gmmMultibandResults =
     clusterSensor === "s2" ? sortClusterResultsByDate(gmmMultibandResultsRaw) : gmmMultibandResultsRaw;
 
-  if (!open) return null;
+  /**
+   * Mientras una galería o el visor de clusters está abierto ocultamos el diálogo
+   * principal de «Visualización» y, al cerrar la galería/cluster, llamamos a
+   * `onClose` externo. Así el usuario regresa directamente al dashboard sin pasar
+   * de nuevo por esta modal.
+   */
+  const viewerActive = galleryOpen || clusterOpen;
+  if (!open && !viewerActive) return null;
+
+  const closeGalleryAndModal = () => {
+    setGalleryOpen(false);
+    onClose?.();
+  };
+
+  const closeClusterAndModal = () => {
+    setClusterOpen(false);
+    setClusterData(null);
+    setClusterError("");
+    onClose?.();
+  };
 
   return (
     <>
+      {open && !viewerActive ? (
       <div
         className="client-viz-overlay"
         role="dialog"
@@ -261,6 +281,7 @@ export default function ClientVisualizationModal({
           </div>
         </div>
       </div>
+      ) : null}
 
       <RgbTimeSeriesGallery
         open={galleryOpen}
@@ -269,7 +290,7 @@ export default function ClientVisualizationModal({
         indexCatalog={galleryPipelineVariant === "ps" ? INDEX_CATALOG_PS : INDEX_CATALOG}
         selectedIndices={[]}
         onSelectedIndicesChange={() => {}}
-        onClose={() => setGalleryOpen(false)}
+        onClose={closeGalleryAndModal}
         canEstimate={false}
         onEstimateIndices={undefined}
         projectId={projectId}
@@ -283,11 +304,7 @@ export default function ClientVisualizationModal({
           role="dialog"
           aria-modal="true"
           aria-labelledby="client-cluster-results-title"
-          onClick={() => {
-            setClusterOpen(false);
-            setClusterData(null);
-            setClusterError("");
-          }}
+          onClick={closeClusterAndModal}
         >
           <div className="cluster-results-modal" onClick={(e) => e.stopPropagation()}>
             <div className="index-modal-header cluster-modal-header-tools cluster-results-modal-header">
@@ -345,11 +362,7 @@ export default function ClientVisualizationModal({
               <button
                 type="button"
                 className="index-modal-close"
-                onClick={() => {
-                  setClusterOpen(false);
-                  setClusterData(null);
-                  setClusterError("");
-                }}
+                onClick={closeClusterAndModal}
                 aria-label="Cerrar"
               >
                 ×

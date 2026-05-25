@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 /** Índices agrupados; clave de vigor en inventario: KNDVI. */
 const INDEX_CATEGORY_GROUPS = [
@@ -45,6 +45,7 @@ export default function SensorTimelapseViewer({
   rgbEmptyMessage = "Sin recorte RGB para esta fecha.",
   opacity,
   onOpacity,
+  onOpenClientVisualization,
   interactive = false,
   roiMode = false,
   onToggleRoi,
@@ -52,11 +53,21 @@ export default function SensorTimelapseViewer({
   roiSelection = null,
   clusterPreviewB64 = null,
   clusterVisible = true,
+  onToggleClusterVisible,
+  clusterOptions = [],
+  selectedClusterKey = "",
+  onChangeClusterKey,
   onMediaMouseMove,
   onMediaMouseDown,
   onMediaMouseUp,
   onMediaClick,
 }) {
+  const [dualZoomOpen, setDualZoomOpen] = useState(false);
+  const [dzScale, setDzScale] = useState(1);
+  const [dzPan, setDzPan] = useState({ x: 0, y: 0 });
+  const [dzDragging, setDzDragging] = useState(false);
+  const dzDragRef = useRef({ dragging: false, startX: 0, startY: 0, panX: 0, panY: 0 });
+
   const current = frames[currentIdx] || null;
   const roiPoints = Array.isArray(roiSelection?.polygon_points) ? roiSelection.polygon_points : [];
   const roiPointsSvg = roiPoints.map((p) => `${p.x * 100},${p.y * 100}`).join(" ");
@@ -95,6 +106,66 @@ export default function SensorTimelapseViewer({
       ))}
     </svg>
   ) : null;
+
+  const resetDualZoom = useCallback(() => {
+    setDzScale(1);
+    setDzPan({ x: 0, y: 0 });
+  }, []);
+
+  useEffect(() => {
+    if (!dualZoomOpen) resetDualZoom();
+  }, [dualZoomOpen, resetDualZoom]);
+
+  useEffect(() => {
+    if (dzScale <= 1.01) setDzPan({ x: 0, y: 0 });
+  }, [dzScale]);
+
+  const onDualZoomWheel = useCallback((e) => {
+    if (!dualPaneRgb || !dualZoomOpen) return;
+    e.preventDefault();
+    const delta = e.deltaY < 0 ? 0.1 : -0.1;
+    setDzScale((prev) => {
+      const next = Math.max(1, Math.min(4, Number((prev + delta).toFixed(3))));
+      if (next <= 1.01) setDzPan({ x: 0, y: 0 });
+      return next;
+    });
+  }, [dualPaneRgb, dualZoomOpen]);
+
+  const onDualPanMouseDown = useCallback(
+    (e) => {
+      if (e.button !== 0) return;
+      if (!dualZoomOpen || dzScale <= 1.01) return;
+      dzDragRef.current = {
+        dragging: true,
+        startX: e.clientX,
+        startY: e.clientY,
+        panX: dzPan.x,
+        panY: dzPan.y,
+      };
+      setDzDragging(true);
+    },
+    [dualZoomOpen, dzScale, dzPan.x, dzPan.y]
+  );
+
+  const onDualPanMouseMove = useCallback((e) => {
+    if (!dzDragRef.current.dragging) return;
+    const dx = e.clientX - dzDragRef.current.startX;
+    const dy = e.clientY - dzDragRef.current.startY;
+    setDzPan({ x: dzDragRef.current.panX + dx, y: dzDragRef.current.panY + dy });
+  }, []);
+
+  const onDualPanMouseUp = useCallback(() => {
+    if (!dzDragRef.current.dragging) return;
+    dzDragRef.current.dragging = false;
+    setDzDragging(false);
+  }, []);
+
+  useEffect(() => {
+    if (!dzDragging) return undefined;
+    const up = () => onDualPanMouseUp();
+    window.addEventListener("mouseup", up);
+    return () => window.removeEventListener("mouseup", up);
+  }, [dzDragging, onDualPanMouseUp]);
 
   const indexSelectContent = useMemo(() => {
     const list = indices || [];
@@ -268,6 +339,30 @@ export default function SensorTimelapseViewer({
             {roiMode ? "ROI activo" : "ROI"}
           </button>
         ) : null}
+        {dualPaneRgb ? (
+          <button
+            type="button"
+            className="adv-viewer-zoom-open-btn"
+            onClick={() => setDualZoomOpen(true)}
+            title="Ampliar Índice y RGB con zoom sincrónico (rueda del ratón; arrastrar si hay zoom)"
+          >
+            <svg
+              className="adv-viewer-zoom-open-icon"
+              width="13"
+              height="13"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.2"
+              strokeLinecap="round"
+              aria-hidden
+            >
+              <circle cx="10" cy="10" r="6" />
+              <path d="M16 16l6 6" />
+            </svg>
+            Zoom
+          </button>
+        ) : null}
         {showRoi && roiHasShape && typeof onClearRoi === "function" ? (
           <button
             type="button"
@@ -312,8 +407,176 @@ export default function SensorTimelapseViewer({
               onChange={(e) => onOpacity(Number(e.target.value))}
             />
           </label>
+          {typeof onOpenClientVisualization === "function" ? (
+            <button
+              type="button"
+              className="adv-viewer-historic-btn"
+              onClick={() => onOpenClientVisualization()}
+              title="Abrir la ventana de visualización histórica (Sentinel-1, Sentinel-2, Alta resolución)"
+            >
+              Visual histórica
+            </button>
+          ) : null}
         </div>
       </div>
+      {dualZoomOpen && dualPaneRgb ? (
+        <div className="adv-viewer-zoom-overlay" role="dialog" aria-modal="true" aria-labelledby="adv-viewer-zoom-title">
+          <div className="adv-viewer-zoom-backdrop" onClick={() => setDualZoomOpen(false)} />
+          <div className="adv-viewer-zoom-window" onClick={(e) => e.stopPropagation()}>
+            <div className="adv-viewer-zoom-header">
+              <h3 id="adv-viewer-zoom-title">Índice y RGB — zoom sincrónico</h3>
+              <button type="button" className="adv-close-btn" onClick={() => setDualZoomOpen(false)} aria-label="Cerrar">
+                ×
+              </button>
+            </div>
+            <p className="adv-viewer-zoom-hint">
+              Rueda del ratón para acercar o alejar en cualquier panel. Con zoom, arrastre para mover (ambas vistas a la vez).
+            </p>
+            {(clusterOptions && clusterOptions.length > 0) || typeof onToggleClusterVisible === "function" ? (
+              <div className="adv-timelapse-toolbar adv-viewer-zoom-cluster-row">
+                {clusterOptions && clusterOptions.length > 0 ? (
+                  <label className="adv-timelapse-toolbar-field">
+                    <span className="adv-timelapse-toolbar-label">Cluster</span>
+                    <select
+                      value={selectedClusterKey || ""}
+                      onChange={(e) =>
+                        typeof onChangeClusterKey === "function" && onChangeClusterKey(e.target.value)
+                      }
+                    >
+                      {clusterOptions.map((r) => (
+                        <option key={r.key} value={r.key}>
+                          {r.label || r.key}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+                {typeof onToggleClusterVisible === "function" ? (
+                  <label className="adv-inline-check adv-timelapse-toolbar-check">
+                    <input
+                      type="checkbox"
+                      checked={clusterVisible}
+                      onChange={(e) => onToggleClusterVisible(e.target.checked)}
+                    />
+                    Overlay
+                  </label>
+                ) : null}
+              </div>
+            ) : null}
+            <div className="adv-viewer-controls adv-viewer-zoom-controls">
+              <select value={selectedIndex} onChange={(e) => onChangeIndex(e.target.value)}>
+                {indexSelectContent}
+              </select>
+              <span className="adv-date-chip adv-viewer-controls-date">{dateStr}</span>
+              <button
+                type="button"
+                onClick={() => onChangeFrameIdx(Math.max(0, currentIdx - 1))}
+                disabled={currentIdx <= 0}
+              >
+                ◀
+              </button>
+              <button type="button" onClick={onPlayPause}>
+                {isPlaying ? "Pause" : "Play"}
+              </button>
+              {typeof onStop === "function" ? (
+                <button type="button" onClick={onStop} title="Detener y volver al inicio">
+                  Stop
+                </button>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => onChangeFrameIdx(Math.min(Math.max(frames.length - 1, 0), currentIdx + 1))}
+                disabled={currentIdx >= frames.length - 1}
+              >
+                ▶
+              </button>
+            </div>
+            <div className="adv-viewer-zoom-toolbar">
+              <button type="button" onClick={() => setDzScale((z) => Math.max(1, Number((z - 0.2).toFixed(2))))} aria-label="Alejar">
+                −
+              </button>
+              <input
+                type="range"
+                min={1}
+                max={4}
+                step={0.05}
+                value={dzScale}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  setDzScale(v);
+                  if (v <= 1.01) setDzPan({ x: 0, y: 0 });
+                }}
+                aria-label="Nivel de zoom"
+              />
+              <button type="button" onClick={() => setDzScale((z) => Math.min(4, Number((z + 0.2).toFixed(2))))} aria-label="Acercar">
+                +
+              </button>
+              <button type="button" onClick={resetDualZoom}>
+                Reset
+              </button>
+              <span className="adv-viewer-zoom-pct">{Math.round(dzScale * 100)}%</span>
+            </div>
+            <div
+              className={`adv-viewer-zoom-dual${dzDragging ? " is-dragging" : ""}`}
+              onWheel={onDualZoomWheel}
+              onMouseDown={onDualPanMouseDown}
+              onMouseMove={onDualPanMouseMove}
+              onMouseUp={onDualPanMouseUp}
+              onMouseLeave={onDualPanMouseUp}
+            >
+              <div className="adv-viewer-zoom-col adv-viewer-zoom-col--index">
+                <span className="adv-viewer-pane-label">Índice</span>
+                <div className="adv-viewer-zoom-frame">
+                  <div
+                    className="adv-viewer-zoom-inner"
+                    style={{
+                      transform: `translate(${dzPan.x}px, ${dzPan.y}px) scale(${dzScale})`,
+                      transformOrigin: "center center",
+                    }}
+                  >
+                    {imageSrc ? (
+                      <div className="adv-viewer-zoom-img-stack">
+                        <img className="adv-viewer-stack-img" src={imageSrc} alt={imageAlt} style={{ opacity }} draggable={false} />
+                        {clusterVisible && clusterPreviewB64 ? (
+                          <img
+                            className="adv-viewer-stack-cluster"
+                            src={`data:image/png;base64,${clusterPreviewB64}`}
+                            alt=""
+                            draggable={false}
+                          />
+                        ) : null}
+                        {roiOverlay}
+                      </div>
+                    ) : (
+                      <div className="adv-viewer-empty">Sin preview para esta escena.</div>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <div className="adv-viewer-zoom-col adv-viewer-zoom-col--rgb">
+                <span className="adv-viewer-pane-label">{rightPaneLabel}</span>
+                <div className="adv-viewer-zoom-frame">
+                  <div
+                    className="adv-viewer-zoom-inner"
+                    style={{
+                      transform: `translate(${dzPan.x}px, ${dzPan.y}px) scale(${dzScale})`,
+                      transformOrigin: "center center",
+                    }}
+                  >
+                    {rgbImageSrc ? (
+                      <div className="adv-viewer-zoom-img-stack">
+                        <img className="adv-viewer-rgb-img" src={rgbImageSrc} alt={rgbAlt} draggable={false} />
+                      </div>
+                    ) : (
+                      <div className="adv-viewer-empty">{rgbEmptyMessage}</div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }
