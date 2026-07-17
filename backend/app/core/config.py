@@ -68,6 +68,12 @@ class Settings(BaseSettings):
     rate_limit_max_requests: int = 600
     ai_service_url: str = "http://localhost:8001"
     storage_path: str = Field(default_factory=_default_storage_path)
+    # Disco local de datos grandes (recorte S1/S2/PS). En Docker: montar host → /data_bioagro.
+    # Vacío = deshabilitado. Ejemplo host: /mnt/disco3tb/Data_Bioagro
+    external_data_root: str = Field(
+        default="",
+        description="Raíz de datos externos locales (solo lectura lógica). Subpaths vía prefijo ext:.",
+    )
     max_upload_mb: int = 4096  # Sentinel-2 ZIP; variable de entorno MAX_UPLOAD_MB tiene prioridad
     copernicus_user: str = Field(
         default="",

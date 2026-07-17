@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import api, { formatApiErrorDetail, setAuthToken } from "../api";
 import RgbTimeSeriesGallery from "./RgbTimeSeriesGallery";
 import VegetationTimeSeriesCharts from "./VegetationTimeSeriesCharts";
+import ProjectStorageFolderPicker from "./ProjectStorageFolderPicker";
 
 /** Opciones de índice (sin TODOS en el payload; TODOS solo UI). */
 export const INDEX_CATALOG = [
@@ -280,6 +281,10 @@ export default function PreprocessPanel({
   const [l2aSelected, setL2aSelected] = useState(() => new Set());
   /** undefined = carpeta descargas Sentinel por defecto (slug); string = ruta bajo raíz del proyecto */
   const [l2aJobSourceSubpath, setL2aJobSourceSubpath] = useState(undefined);
+  const [folderPickerOpen, setFolderPickerOpen] = useState(false);
+  const [psSourceSubpath, setPsSourceSubpath] = useState(undefined);
+  const [psFolderPickerOpen, setPsFolderPickerOpen] = useState(false);
+  const [psZipInfo, setPsZipInfo] = useState(null);
   const [clusterPeekHint, setClusterPeekHint] = useState("");
   const [loadingClusterPersisted, setLoadingClusterPersisted] = useState(false);
   /** Inicializar con el kick actual para no reabrir galería/modales al remontar la pestaña S2/PS. */
@@ -364,15 +369,18 @@ export default function PreprocessPanel({
     await loadTenantProjectsForL2a();
   }
 
-  async function loadDefaultL2aInventory() {
+  async function loadDefaultL2aInventory(subpath) {
     if (!projectId || !token) return;
     setL2aInventoryLoading(true);
     setL2aError("");
     try {
       setAuthToken(token);
-      const r = await api.get(`/raster/project-downloads-inventory/${projectId}`);
+      const params = {};
+      if (subpath !== undefined) params.subpath = subpath;
+      const r = await api.get(`/raster/project-downloads-inventory/${projectId}`, { params });
       setL2aInventory(r.data);
-      setL2aJobSourceSubpath(undefined);
+      setL2aJobSourceSubpath(subpath);
+      setL2aSelected(new Set());
       setL2aUiStep("pick");
     } catch (e) {
       setL2aError(formatApiErrorDetail(e));
@@ -382,7 +390,21 @@ export default function PreprocessPanel({
   }
 
   async function onL2aQuestionNo() {
-    await loadDefaultL2aInventory();
+    await loadDefaultL2aInventory(undefined);
+  }
+
+  async function loadPsZipInventory(subpath) {
+    if (!projectId || !token) return;
+    try {
+      setAuthToken(token);
+      const params = {};
+      if (subpath !== undefined) params.subpath = subpath;
+      const r = await api.get(`/raster/project-planetscope-zip-inventory/${projectId}`, { params });
+      setPsZipInfo(r.data);
+      setPsSourceSubpath(subpath);
+    } catch (e) {
+      setPsZipInfo({ error: formatApiErrorDetail(e) });
+    }
   }
 
   async function copyDownloadsFromSelectedProjectAndList() {
@@ -397,7 +419,7 @@ export default function PreprocessPanel({
           target_project_id: Number(projectId),
         },
       });
-      await loadDefaultL2aInventory();
+      await loadDefaultL2aInventory(undefined);
     } catch (e) {
       setL2aError(formatApiErrorDetail(e));
     } finally {
@@ -415,6 +437,12 @@ export default function PreprocessPanel({
       return next;
     });
   }
+
+  useEffect(() => {
+    if (pipelineVariant !== "ps" || !projectId || !token) return;
+    void loadPsZipInventory(undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- solo al abrir pestaña PS / cambiar proyecto
+  }, [pipelineVariant, projectId, token]);
 
   useEffect(() => {
     if (!visualIndexGalleryKick || visualIndexGalleryKick <= lastVisualIndexKick.current) return;
@@ -456,6 +484,27 @@ export default function PreprocessPanel({
     pipelineVariant === "s2"
       ? sortClusterResultsByDate(gmmMultibandResultsRaw)
       : gmmMultibandResultsRaw;
+
+  async function runVegetationTimeSeriesFromStacks() {
+    if (!token || !projectId) return;
+    setVtsLoading(true);
+    setVtsError("");
+    try {
+      setAuthToken(token);
+      const res = await api.post("/preprocess/vegetation-time-series", {
+        project_id: Number(projectId),
+        pipeline_variant: pipelineVariant === "ps" ? "ps" : "s2",
+        max_pixel_series: 4000,
+        random_seed: 42,
+      });
+      setVtsData(res.data);
+      setVtsModalOpen(true);
+    } catch (e) {
+      setVtsError(formatApiErrorDetail(e));
+    } finally {
+      setVtsLoading(false);
+    }
+  }
 
   async function openClusterGmmResultsOrHint() {
     if (clusterGmmResults?.results?.length) {
@@ -525,11 +574,39 @@ export default function PreprocessPanel({
           <button
             type="button"
             className="indices-run-btn"
-            onClick={() => void onPsPlanetExtract?.()}
+            onClick={() => void onPsPlanetExtract?.(psSourceSubpath)}
             disabled={busy || !projectId || !token}
           >
             Extraer archivo
           </button>
+          <p className="l2a-downloads-hint" style={{ marginTop: 8 }}>
+            Carpeta origen:{" "}
+            <code>
+              {psSourceSubpath === undefined
+                ? "rasterPS/ (por defecto)"
+                : psSourceSubpath || "(raíz del proyecto)"}
+            </code>
+            {psZipInfo?.zips ? ` · ${psZipInfo.zips.length} ZIP` : null}
+          </p>
+          <div className="l2a-downloads-actions" style={{ marginTop: 8 }}>
+            <button
+              type="button"
+              className="rgb-gallery-btn-secondary"
+              disabled={busy || !projectId || !token}
+              onClick={() => setPsFolderPickerOpen(true)}
+            >
+              Elegir carpeta
+            </button>
+            <button
+              type="button"
+              className="rgb-gallery-btn-secondary"
+              disabled={busy || !projectId || !token}
+              onClick={() => void loadPsZipInventory(undefined)}
+            >
+              Usar rasterPS por defecto
+            </button>
+          </div>
+          {psZipInfo?.error ? <p className="rgb-gallery-error">{psZipInfo.error}</p> : null}
         </>
       ) : (
         <>
@@ -690,7 +767,35 @@ export default function PreprocessPanel({
                     <>
                       <p className="l2a-downloads-hint">
                         Carpeta escaneada: <code>{l2aInventory.downloads_dir}</code>
+                        {l2aJobSourceSubpath !== undefined ? (
+                          <>
+                            {" "}
+                            (origen: <code>{l2aJobSourceSubpath || "(raíz)"}</code>)
+                          </>
+                        ) : (
+                          <> (por defecto Sentinel2)</>
+                        )}
                       </p>
+                      <div className="l2a-downloads-actions" style={{ marginBottom: 8 }}>
+                        <button
+                          type="button"
+                          className="rgb-gallery-btn-secondary"
+                          disabled={l2aInventoryLoading}
+                          onClick={() => setFolderPickerOpen(true)}
+                        >
+                          Elegir otra carpeta
+                        </button>
+                        {l2aJobSourceSubpath !== undefined ? (
+                          <button
+                            type="button"
+                            className="rgb-gallery-btn-secondary"
+                            disabled={l2aInventoryLoading}
+                            onClick={() => void loadDefaultL2aInventory(undefined)}
+                          >
+                            Volver a Sentinel2 por defecto
+                          </button>
+                        ) : null}
+                      </div>
                       <button
                         type="button"
                         className="l2a-back-to-browse"
@@ -936,22 +1041,23 @@ export default function PreprocessPanel({
           <strong>5) Series tiempo</strong>
           <span className="indices-section-hint">
             {pipelineVariant === "ps"
-              ? "Mismas escenas PlanetScope (8 bandas) en recortesPS: medias espaciales por índice y fecha, curvas por píxel, media temporal y tendencia (mismo diseño que S2)."
-              : "Mismas escenas L2A (6 bandas) que en el paso 3: medias espaciales de los cinco índices por fecha, con media temporal y ±1σ (espacial y temporal)."}
+              ? "Sobre cada stack en indecesPS/ (índices ya estimados): medias espaciales por fecha, curvas por píxel, media temporal y tendencia."
+              : "Sobre cada stack en indices/ (índices ya estimados): medias espaciales por fecha, curvas por píxel, media temporal y ±1σ."}
           </span>
         </div>
         <button
           type="button"
           className="indices-run-btn"
-          onClick={() => {
-            setVtsError("");
-            setGalleryMode("timeSeriesSelect");
-            setGalleryOpen(true);
-          }}
-          disabled={busy || !projectId || !token}
+          onClick={() => void runVegetationTimeSeriesFromStacks()}
+          disabled={busy || !projectId || !token || vtsLoading}
         >
-          Seleccionar escenas
+          {vtsLoading ? "Calculando series…" : "Calcular series de tiempo"}
         </button>
+        {vtsError ? (
+          <p className="prepro-hint" role="alert">
+            {vtsError}
+          </p>
+        ) : null}
       </div>
 
       {clusterModalOpen ? (
@@ -981,22 +1087,20 @@ export default function PreprocessPanel({
             </div>
             <div className="index-modal-body cluster-flow-body">
               <p className="cluster-flow-intro">
-                {pipelineVariant === "ps"
-                  ? (
-                    <>
-                      Se analiza cada stack de índices en <code>indecesPS/</code> (NDVI, NDWI, MSAVI2, …).
-                      Primero el método del codo (KMeans) en una sola fila; luego indica una única K y ejecuta GMM
-                      (la misma para todos los índices). Salida en <code>{clusterDirLabel}/</code>.
-                    </>
-                  )
-                  : (
-                    <>
-                      Se analiza cada stack de índices (NDVI, EVI, …) y <strong>todos</strong> los GeoTIFF con ≥6
-                      bandas en <code>{recDirLabel}/</code>. Primero el método del codo (KMeans) en una sola fila;
-                      luego indica una única K y ejecuta GMM (la misma para todos los datasets). Salida en{" "}
-                      <code>{clusterDirLabel}/</code>. Los mapas se abren en otra ventana al terminar.
-                    </>
-                  )}
+                {pipelineVariant === "ps" ? (
+                  <>
+                    Se analiza cada stack de índices en <code>indecesPS/</code> (NDVI, NDWI, MSAVI2, …).
+                    Primero el método del codo (KMeans) en una sola fila; luego indica una única K y ejecuta GMM
+                    (la misma para todos los índices). Salida en <code>{clusterDirLabel}/</code>.
+                  </>
+                ) : (
+                  <>
+                    Se analiza cada stack de índices en <code>indices/</code> (NDVI, EVI, NDWI, …): una banda por
+                    fecha. No se usan los recortes L2A de <code>{recDirLabel}/</code>. Primero el método del codo
+                    (KMeans); luego indica una única K y ejecuta GMM (la misma para todos los índices). Salida en{" "}
+                    <code>{clusterDirLabel}/</code>.
+                  </>
+                )}
               </p>
               <div className="cluster-flow-toolbar">
                 <button
@@ -1259,43 +1363,7 @@ export default function PreprocessPanel({
           }
           setGalleryOpen(false);
         }}
-        onTimeSeries={async (arg) => {
-          if (!token || !projectId) return;
-          let raster_layer_ids = [];
-          let recorte_relative_paths = [];
-          let pv = pipelineVariant === "ps" ? "ps" : "s2";
-          if (Array.isArray(arg)) {
-            raster_layer_ids = arg;
-          } else if (arg && typeof arg === "object") {
-            if (Array.isArray(arg.s1SarDates)) return;
-            raster_layer_ids = arg.rasterLayerIds ?? arg.raster_layer_ids ?? [];
-            recorte_relative_paths = arg.recorteRelativePaths ?? arg.recorte_relative_paths ?? [];
-            if (arg.pipelineVariant === "ps" || arg.pipelineVariant === "s2") {
-              pv = arg.pipelineVariant;
-            }
-          } else return;
-          if (!raster_layer_ids.length && !recorte_relative_paths.length) return;
-          setVtsLoading(true);
-          setVtsError("");
-          try {
-            setAuthToken(token);
-            const res = await api.post("/preprocess/vegetation-time-series", {
-              project_id: Number(projectId),
-              raster_layer_ids,
-              recorte_relative_paths,
-              pipeline_variant: pv,
-              max_pixel_series: 4000,
-              random_seed: 42,
-            });
-            setVtsData(res.data);
-            setGalleryOpen(false);
-            setVtsModalOpen(true);
-          } catch (e) {
-            setVtsError(formatApiErrorDetail(e));
-          } finally {
-            setVtsLoading(false);
-          }
-        }}
+        onTimeSeries={undefined}
         projectId={projectId}
         token={token}
         pipelineVariant={pipelineVariant}
@@ -1348,6 +1416,34 @@ export default function PreprocessPanel({
           {vtsError}
         </div>
       ) : null}
+
+      <ProjectStorageFolderPicker
+        open={folderPickerOpen}
+        projectId={projectId}
+        token={token}
+        kind="s2"
+        title="Carpeta origen Sentinel-2 (L2A)"
+        initialPath={l2aJobSourceSubpath || "downloads"}
+        onCancel={() => setFolderPickerOpen(false)}
+        onSelect={(rel) => {
+          setFolderPickerOpen(false);
+          void loadDefaultL2aInventory(rel);
+        }}
+      />
+
+      <ProjectStorageFolderPicker
+        open={psFolderPickerOpen}
+        projectId={projectId}
+        token={token}
+        kind="ps"
+        title="Carpeta origen PlanetScope (ZIP)"
+        initialPath={psSourceSubpath || "rasterPS"}
+        onCancel={() => setPsFolderPickerOpen(false)}
+        onSelect={(rel) => {
+          setPsFolderPickerOpen(false);
+          void loadPsZipInventory(rel);
+        }}
+      />
     </>
   );
 }

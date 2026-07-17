@@ -115,9 +115,112 @@ body {
   padding: 0 4px;
 }
 
+/* Con el selector de índices en la misma fila, el zoom ocupa lo mínimo. */
+.rgb-gallery-header-toolbar--compact {
+  flex: 0 0 auto;
+  justify-content: flex-end;
+  gap: 4px 6px;
+  padding: 0;
+}
+
 .rgb-gallery-zoom-range--header {
   width: min(160px, 22vw);
   min-width: 80px;
+}
+
+.rgb-gallery-header-toolbar--compact .rgb-gallery-zoom-range--header {
+  width: min(88px, 12vw);
+  min-width: 56px;
+}
+
+.rgb-gallery-header--with-switcher {
+  gap: 8px 14px;
+}
+
+.rgb-gallery-header--with-switcher .rgb-gallery-title {
+  flex: 0 1 auto;
+}
+
+/* Selector de índices dentro de la primera fila (tras el título). */
+.rgb-gallery-index-switcher--inline {
+  flex: 1 1 auto;
+  padding: 0;
+  margin: 0;
+  border-bottom: none;
+  justify-content: center;
+  gap: 6px 8px;
+}
+
+/* Escala de color del índice (paleta RdYlGn, valores 0–1) — inline en el header. */
+.rgb-gallery-scale {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 200px;
+  min-width: 140px;
+  max-width: 320px;
+}
+
+.rgb-gallery-scale-end {
+  font-size: 10px;
+  font-weight: 600;
+  color: #4a5568;
+  white-space: nowrap;
+  line-height: 1;
+}
+
+.rgb-gallery-scale-track {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.rgb-gallery-scale-bar {
+  height: 12px;
+  border-radius: 3px;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  background: linear-gradient(
+    to right,
+    #a50026 0%,
+    #d73027 10%,
+    #f46d43 20%,
+    #fdae61 30%,
+    #fee08b 40%,
+    #ffffbf 50%,
+    #d9ef8b 60%,
+    #a6d96a 70%,
+    #66bd63 80%,
+    #1a9850 90%,
+    #006837 100%
+  );
+}
+
+.rgb-gallery-scale-bar--jet {
+  background: linear-gradient(
+    to right,
+    #00007f 0%,
+    #0000ff 12%,
+    #007fff 25%,
+    #00ffff 38%,
+    #7fff7f 50%,
+    #ffff00 62%,
+    #ff7f00 75%,
+    #ff0000 88%,
+    #7f0000 100%
+  );
+}
+
+.rgb-gallery-scale-ticks {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 1px;
+  font-size: 9px;
+  color: #94a3b8;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.rgb-gallery-scale-ticks span:nth-child(2) {
+  text-align: center;
 }
 
 .rgb-gallery-download-btn {
@@ -422,7 +525,7 @@ body {
   text-align: center;
 }
 
-/* Visual VV (s1prepoceso): polarización VV/VH en la barra de zoom */
+/* Visual VV (s1preproceso): polarización VV/VH en la barra de zoom */
 .rgb-gallery-s1-pol {
   display: inline-flex;
   align-items: center;
@@ -1350,6 +1453,29 @@ body {
   background: #fee2e2 !important;
   color: #991b1b !important;
   border-radius: 6px;
+}
+
+.admin-project-delete-btn {
+  margin-top: 0.35rem;
+  color: #b91c1c;
+  border-color: rgba(185, 28, 28, 0.35);
+}
+
+.admin-project-delete-btn:hover:not(:disabled) {
+  background: rgba(185, 28, 28, 0.08);
+}
+
+.landing-narrative-btn {
+  background: linear-gradient(135deg, #fff8e1 0%, #ffe0b2 100%);
+  border-color: #ffb74d;
+  color: #e65100;
+  font-weight: 600;
+}
+
+.landing-narrative-btn:hover:not(:disabled) {
+  background: #ff9800;
+  color: #fff;
+  border-color: #f57c00;
 }
 
 .share-project-btn {
@@ -2377,6 +2503,11 @@ body {
   gap: 8px;
 }
 
+.date-range-fields .date-range-hint {
+  grid-column: 1 / -1;
+  margin: 0 0 0.15rem;
+}
+
 .date-range-fields label {
   font-size: 12px;
 }
@@ -2387,6 +2518,49 @@ body {
   border: 1px solid #ccc;
   border-radius: 6px;
   font-size: 12px;
+}
+
+.s1-per-month-field {
+  margin-top: 0.65rem;
+}
+
+.s1-per-month-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 0.35rem;
+}
+
+.s1-per-month-toggle {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.s1-per-month-btn {
+  min-width: 2.5rem;
+  padding: 0.35rem 0.65rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #fff;
+  color: #334155;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.s1-per-month-btn.active {
+  background: #166534;
+  border-color: #166534;
+  color: #fff;
+}
+
+.s1-per-month-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.s1-per-month-hint {
+  margin: 0.4rem 0 0;
 }
 
 .step-fieldset {
@@ -4125,17 +4299,20 @@ body {
 .adv-soilplus-top-row {
   display: grid;
   grid-template-columns: minmax(260px, 38%) 1fr;
-  grid-template-rows: 1fr;
+  grid-template-rows: minmax(0, 1fr);
   gap: 14px;
   align-items: stretch;
   min-height: 0;
-  flex: 1 1 0;
+  flex: 0 1 auto;
+  max-height: min(44vh, 440px);
+  overflow: hidden;
 }
 
 .adv-dashboard-soil-body > .adv-soilplus-top-row,
 .adv-soilplus-window-scroll > .adv-soilplus-top-row {
-  flex: 1 1 0;
-  min-height: 220px;
+  flex: 0 1 auto;
+  min-height: 200px;
+  max-height: min(44vh, 440px);
 }
 
 .adv-dashboard-soil-body > .adv-soilplus-bottom-strip,
@@ -4213,11 +4390,19 @@ body {
 }
 
 .adv-soilplus-card--dem-top {
-  align-self: start;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .adv-soilplus-card--dem-top .adv-soilplus-image-frame--dem-roi {
-  min-height: 240px;
+  flex: 1 1 0;
+  min-height: 160px;
+  max-height: none;
+  overflow: hidden;
 }
 
 .adv-soilplus-card--final-zoning {
@@ -4228,6 +4413,8 @@ body {
   flex: 1;
   height: 100%;
   align-self: stretch;
+  overflow: hidden;
+  position: relative;
 }
 
 .adv-soilplus-card--final-zoning .adv-soilplus-zoom-tools {
@@ -4236,13 +4423,14 @@ body {
 
 .adv-soilplus-card--final-zoning .adv-soilplus-image-frame.adv-soilplus-image-frame--cluster {
   flex: 1 1 0;
-  min-height: min(240px, 36vh);
-  max-height: min(58vh, 720px);
+  min-height: 160px;
+  max-height: none;
   position: relative;
   display: flex;
   flex-direction: column;
   align-items: stretch;
   justify-content: flex-start;
+  overflow: hidden;
 }
 
 .adv-soilplus-card--final-zoning .adv-soilplus-cluster-scroll {
@@ -4378,7 +4566,7 @@ body {
   border: 1px solid #edf2fa;
   border-radius: 8px;
   background: #fcfdff;
-  min-height: 230px;
+  min-height: 160px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -4388,26 +4576,34 @@ body {
 .adv-soilplus-dem-roi-stack {
   margin-top: 0;
   width: 100%;
+  height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   align-items: stretch;
+  overflow: hidden;
 }
 
 .adv-soilplus-dem-roi-inner {
   position: relative;
   width: 100%;
-  display: block;
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   line-height: 0;
-  min-height: 300px;
+  overflow: hidden;
 }
 
 .adv-soilplus-dem-roi-img {
   display: block;
   width: 100%;
-  height: auto;
-  max-height: min(58vh, 520px);
+  height: 100%;
+  max-height: 100%;
   object-fit: contain;
-  object-position: center top;
+  object-position: center center;
   border-radius: 6px;
 }
 
@@ -4423,6 +4619,7 @@ body {
   align-items: center;
   gap: 8px;
   margin-top: 8px;
+  flex-shrink: 0;
 }
 
 .adv-soilplus-roi-btn {
@@ -4450,7 +4647,8 @@ body {
   flex-direction: column;
   align-items: stretch;
   justify-content: flex-start;
-  overflow: visible;
+  overflow: hidden;
+}
   min-height: 340px;
 }
 
@@ -5187,6 +5385,142 @@ body {
   flex-shrink: 0;
 }
 
+.adv-ia-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.adv-ia-pdf-btn {
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid #86efac;
+  background: #ecfdf5;
+  color: #166534;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.adv-ia-pdf-btn:hover:not(:disabled) {
+  background: #d1fae5;
+  border-color: #4ade80;
+}
+
+.adv-ia-pdf-btn:focus-visible {
+  outline: 2px solid #16a34a;
+  outline-offset: 2px;
+}
+
+.adv-ia-pdf-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+@media print {
+  @page {
+    margin: 14mm 12mm;
+    size: A4;
+  }
+
+  body.adv-ia-printing * {
+    visibility: hidden;
+  }
+
+  body.adv-ia-printing .adv-ia-overlay,
+  body.adv-ia-printing .adv-ia-print-area,
+  body.adv-ia-printing .adv-ia-print-area * {
+    visibility: visible;
+  }
+
+  body.adv-ia-printing .adv-ia-overlay {
+    position: static;
+    padding: 0;
+    display: block;
+  }
+
+  body.adv-ia-printing .adv-ia-print-area {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    max-width: none;
+    max-height: none;
+    overflow: visible;
+    box-shadow: none;
+    border: none;
+    border-radius: 0;
+  }
+
+  body.adv-ia-printing .adv-no-print {
+    display: none !important;
+  }
+
+  body.adv-ia-printing .adv-ia-body--report {
+    overflow: visible !important;
+    max-height: none !important;
+    padding: 0 4mm 8mm;
+  }
+
+  body.adv-ia-printing .adv-ia-sub--report {
+    padding-left: 0;
+    padding-right: 0;
+  }
+
+  body.adv-ia-printing .adv-ia-header--report {
+    padding-left: 0;
+    padding-right: 0;
+    border-bottom-color: #cbd5e1;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  body.adv-ia-printing .adv-ia-report-hero,
+  body.adv-ia-printing .adv-ia-table th,
+  body.adv-ia-printing .adv-ia-table tbody tr:nth-child(even) td {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  body.adv-ia-printing .adv-ia-table-wrap {
+    overflow: visible;
+    break-inside: avoid;
+  }
+
+  body.adv-ia-printing .adv-ia-table {
+    min-width: 0;
+    font-size: 9pt;
+  }
+
+  body.adv-ia-printing .adv-ia-table th {
+    position: static;
+  }
+
+  body.adv-ia-printing .adv-ia-figure {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  body.adv-ia-printing .adv-ia-figure-img {
+    max-width: 100%;
+    box-shadow: none;
+  }
+
+  body.adv-ia-printing .adv-ia-chapter-title,
+  body.adv-ia-printing .adv-ia-section-title {
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+
+  body.adv-ia-printing .adv-ia-paragraph {
+    font-size: 10.5pt;
+    orphans: 3;
+    widows: 3;
+  }
+}
+
 .adv-top-grid {
   min-height: 0;
   display: grid;
@@ -5384,11 +5718,11 @@ body {
   object-fit: contain;
 }
 
-/* Después de la regla anterior: en dual, cubrir el panel (evita bandas grises como en la captura) */
+/* Dual pane: mostrar la imagen completa (no recortar el AOI al cambiar zoom del navegador) */
 .adv-viewer-media-dual .adv-viewer-stack-img,
 .adv-viewer-media-dual .adv-viewer-stack-cluster,
 .adv-viewer-media-dual .adv-viewer-rgb-img {
-  object-fit: cover;
+  object-fit: contain;
   object-position: center;
 }
 
@@ -5798,6 +6132,14 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+}
+
+.adv-climate-toggle-line {
+  display: inline-block;
+  width: 22px;
+  height: 0;
+  border-top: 3px solid var(--climate-toggle-color, #6b7280);
+  border-radius: 999px;
 }
 
 .adv-climate-panel--inline {

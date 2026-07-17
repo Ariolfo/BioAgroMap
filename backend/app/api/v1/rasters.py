@@ -4,9 +4,10 @@ import re
 import shutil
 import uuid
 import zipfile
+from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
@@ -15,8 +16,15 @@ from app.api.v1.helpers import (
     _existing_raster_path,
     _get_project_raster,
     _tenant_storage,
+    encode_source_subpath_for_path,
+    external_data_root_path,
+    encode_external_subpath,
     is_legacy_s2_zip_band_raster,
     project_downloads_dir,
+    project_relative_posix,
+    project_sentinel1_dir,
+    project_sentinel2_dir,
+    resolve_source_subpath,
     validate_upload_size,
 )
 from app.core.config import settings
@@ -388,6 +396,109 @@ def tenant_storage_browse(
     }
 
 
+@router.get("/raster/external-data-status")
+def external_data_status(tenant_id: int = Depends(tenant_from_jwt)):
+    """Indica si hay disco externo (Data_Bioagro) montado y listo para recorte local."""
+    root = external_data_root_path()
+    return {
+        "enabled": root is not None,
+        "root": str(root) if root else None,
+        "label": "Data_Bioagro",
+    }
+
+
+@router.get("/raster/external-data-browse")
+def external_data_browse(
+    path: str = Query("", description="Ruta relativa (posix) bajo EXTERNAL_DATA_ROOT"),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """Navega carpetas en el disco externo local (sin copiar al proyecto)."""
+    root = external_data_root_path()
+    if root is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Disco externo no configurado o no montado (EXTERNAL_DATA_ROOT).",
+        )
+    target = _safe_path_under_project(root, path)
+    if not target.is_dir():
+        raise HTTPException(status_code=404, detail="No es una carpeta")
+    entries: list[dict] = []
+    try:
+        for p in sorted(target.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
+            if p.name.startswith("."):
+                continue
+            try:
+                rel_posix = p.resolve().relative_to(root.resolve()).as_posix()
+            except ValueError:
+                continue
+            if p.is_dir():
+                entries.append({"name": p.name, "kind": "dir", "relative_path": rel_posix})
+            else:
+                try:
+                    sz = p.stat().st_size if p.is_file() else 0
+                except OSError:
+                    sz = 0
+                entries.append(
+                    {"name": p.name, "kind": "file", "relative_path": rel_posix, "size_bytes": sz}
+                )
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    try:
+        rel_current = target.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        rel_current = ""
+    parent_subpath = _parent_subpath_for_browse(root, target)
+    return {
+        "root": str(root),
+        "relative_path": rel_current,
+        "parent_subpath": parent_subpath,
+        "source_subpath": encode_external_subpath(rel_current),
+        "entries": entries,
+    }
+
+
+@router.post("/raster/external-data-mkdir")
+def external_data_mkdir(
+    name: str = Form(..., description="Nombre de la carpeta nueva (un solo segmento)"),
+    parent_path: str = Form("", description="Ruta relativa bajo Data_Bioagro donde crear"),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """Crea una subcarpeta bajo Data_Bioagro (p. ej. un lote nuevo)."""
+    root = external_data_root_path()
+    if root is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Disco externo no configurado o no montado (EXTERNAL_DATA_ROOT).",
+        )
+    raw_name = str(name or "").strip()
+    if not raw_name or "/" in raw_name or "\\" in raw_name or raw_name in {".", ".."}:
+        raise HTTPException(status_code=400, detail="Nombre de carpeta inválido")
+    if not re.fullmatch(r"[A-Za-z0-9ÁÉÍÓÚáéíóúÑñ _.\-]{1,120}", raw_name):
+        raise HTTPException(status_code=400, detail="Nombre de carpeta con caracteres no permitidos")
+    parent = _safe_path_under_project(root, parent_path)
+    if not parent.is_dir():
+        raise HTTPException(status_code=404, detail="Carpeta padre no existe")
+    dest = (parent / raw_name).resolve()
+    try:
+        dest.relative_to(root.resolve())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Ruta fuera de Data_Bioagro") from exc
+    if dest.exists():
+        if not dest.is_dir():
+            raise HTTPException(status_code=400, detail="Ya existe un archivo con ese nombre")
+    else:
+        dest.mkdir(parents=False, exist_ok=False)
+    try:
+        rel = dest.relative_to(root.resolve()).as_posix()
+    except ValueError:
+        rel = raw_name
+    return {
+        "ok": True,
+        "relative_path": rel,
+        "source_subpath": encode_external_subpath(rel),
+    }
+
+
 @router.get("/raster/project-storage-browse/{project_id}")
 def project_storage_browse(
     project_id: int,
@@ -444,7 +555,7 @@ def project_downloads_inventory(
     project_id: int,
     subpath: str | None = Query(
         None,
-        description="Si se envía, lista L2A en esa ruta bajo el proyecto. Si se omite, carpeta descargas por defecto (downloads/<slug>).",
+        description="Si se envía, lista L2A en esa ruta (proyecto o ``ext:``). Si se omite, ``downloads/<slug>/Sentinel2/``.",
     ),
     db: Session = Depends(get_db),
     tenant_id: int = Depends(tenant_from_jwt),
@@ -452,39 +563,158 @@ def project_downloads_inventory(
     """
     Lista productos Sentinel-2 (ZIP y carpetas .SAFE reconocibles, p. ej. L2A/L1C) en el directorio indicado (primer nivel),
     más otros elementos del mismo nivel.
-    Sin ``subpath``: misma carpeta que hasta ahora (descargas Sentinel por nombre de proyecto).
-    Con ``subpath``: carpeta bajo la raíz del proyecto (p. ej. ``downloads/mi_slug``).
+    Sin ``subpath``: ``downloads/<slug>/Sentinel2/`` (misma carpeta que la descarga Sentinel-2).
+    Con ``subpath``: carpeta bajo la raíz del proyecto (p. ej. ``downloads/mi_slug/Sentinel2``).
     """
     project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     if subpath is None:
-        root = project_downloads_dir(tenant_id, project_id, project.name)
+        root = project_sentinel2_dir(tenant_id, project_id, project.name)
     else:
-        pr = _project_root_path(tenant_id, project_id)
-        root = _safe_path_under_project(pr, subpath)
+        resolved = resolve_source_subpath(tenant_id, project_id, subpath)
+        if resolved is None:
+            raise HTTPException(status_code=400, detail="Ruta subpath inválida")
+        root = resolved
     out = _scan_l2a_products_in_dir(root)
-    out["source_subpath"] = None if subpath is None else subpath
+    out["source_subpath"] = encode_source_subpath_for_path(tenant_id, project_id, root, subpath)
     return out
 
 
 @router.get("/raster/project-sentinel1-inventory/{project_id}")
 def project_sentinel1_inventory(
     project_id: int,
+    subpath: str | None = Query(
+        None,
+        description="Si se envía, lista S1 en esa ruta (proyecto o ``ext:``). Si se omite, ``downloads/<slug>/Sentinel1/``.",
+    ),
     db: Session = Depends(get_db),
     tenant_id: int = Depends(tenant_from_jwt),
 ):
     """
-    Lista productos Sentinel-1 (carpetas ``*.SAFE`` bajo ``Sentinel1/``, cualquier profundidad;
-    ZIP GRD en el primer nivel) en ``downloads/<slug>/Sentinel1/``.
+    Lista productos Sentinel-1 (carpetas ``*.SAFE``, ZIP GRD) en la carpeta indicada.
+    Sin ``subpath``: ``downloads/<slug>/Sentinel1/``.
     """
     project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    root = project_downloads_dir(tenant_id, project_id, project.name) / "Sentinel1"
+    if subpath is None:
+        root = project_sentinel1_dir(tenant_id, project_id, project.name)
+    else:
+        resolved = resolve_source_subpath(tenant_id, project_id, subpath)
+        if resolved is None:
+            raise HTTPException(status_code=400, detail="Ruta subpath inválida")
+        root = resolved
     out = _scan_sentinel1_products_in_dir(root)
     out["source"] = "sentinel-1"
+    out["source_subpath"] = encode_source_subpath_for_path(tenant_id, project_id, root, subpath)
     return out
+
+
+@router.get("/raster/project-planetscope-zip-inventory/{project_id}")
+def project_planetscope_zip_inventory(
+    project_id: int,
+    subpath: str | None = Query(
+        None,
+        description="Si se envía, lista ZIP en esa ruta (proyecto o ``ext:``). Si se omite, ``rasterPS/``.",
+    ),
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """Lista ``*.zip`` PlanetScope en la carpeta origen (por defecto ``rasterPS/``)."""
+    from app.services.preprocess_pipeline_variant import planet_zip_dir_name
+
+    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if subpath is None:
+        root = _tenant_storage(tenant_id, project_id, planet_zip_dir_name())
+    else:
+        resolved = resolve_source_subpath(tenant_id, project_id, subpath)
+        if resolved is None:
+            raise HTTPException(status_code=400, detail="Ruta subpath inválida")
+        root = resolved
+    zips: list[dict] = []
+    if root.is_dir():
+        for p in sorted(root.glob("*.zip")):
+            try:
+                sz = p.stat().st_size
+            except OSError:
+                sz = 0
+            zips.append({"name": p.name, "size_bytes": sz})
+    return {
+        "downloads_dir": str(root.resolve()),
+        "exists": root.is_dir(),
+        "zips": zips,
+        "source_subpath": encode_source_subpath_for_path(tenant_id, project_id, root, subpath),
+    }
+
+
+def _safe_relative_import_path(rel: str) -> str | None:
+    """Normaliza ruta relativa de importación local; rechaza absolutas y ``..``."""
+    raw = str(rel or "").strip().replace("\\", "/")
+    if not raw or raw.startswith("/") or raw.startswith("~"):
+        return None
+    parts = [p for p in raw.split("/") if p and p != "."]
+    if not parts or any(p == ".." for p in parts):
+        return None
+    # Quitar el primer segmento (nombre de la carpeta elegida en el SO).
+    if len(parts) > 1:
+        parts = parts[1:]
+    if not parts:
+        return None
+    return "/".join(parts)
+
+
+@router.post("/raster/project-local-folder-import/{project_id}")
+async def project_local_folder_import(
+    project_id: int,
+    kind: str = Form(..., description="s1 | s2 | ps"),
+    relative_path: str = Form(..., description="Ruta relativa del archivo (webkitRelativePath)"),
+    file: UploadFile = File(...),
+    batch_id: str | None = Form(None, description="Id de lote; si se omite se crea uno nuevo"),
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """
+    Sube un archivo desde el computador del usuario a ``local_import/<kind>/<batch_id>/``.
+    Tras subir toda la carpeta, usar ``source_subpath`` devuelto como origen del recorte.
+    """
+    project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    k = str(kind or "").strip().lower()
+    if k not in {"s1", "s2", "ps"}:
+        raise HTTPException(status_code=400, detail="kind debe ser s1, s2 o ps")
+    rel = _safe_relative_import_path(relative_path)
+    if not rel:
+        raise HTTPException(status_code=400, detail="relative_path inválida")
+    await validate_upload_size(file)
+
+    bid = str(batch_id or "").strip()
+    if not bid:
+        bid = datetime.utcnow().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
+    elif not re.fullmatch(r"[A-Za-z0-9_\-]{4,64}", bid):
+        raise HTTPException(status_code=400, detail="batch_id inválido")
+
+    dest_root = _tenant_storage(tenant_id, project_id, "local_import") / k / bid
+    dest_file = (dest_root / rel).resolve()
+    try:
+        dest_file.relative_to(dest_root.resolve())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Ruta fuera del destino de importación") from exc
+    dest_file.parent.mkdir(parents=True, exist_ok=True)
+    with dest_file.open("wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    source_subpath = project_relative_posix(tenant_id, project_id, dest_root)
+    return {
+        "ok": True,
+        "batch_id": bid,
+        "saved_as": rel,
+        "source_subpath": source_subpath,
+        "bytes": dest_file.stat().st_size if dest_file.is_file() else 0,
+    }
 
 
 def _merge_copy_downloads_dir(src: Path, dst: Path) -> int:
@@ -563,7 +793,7 @@ def list_project_download_files(
     project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    d = project_downloads_dir(tenant_id, project_id, project.name)
+    d = project_sentinel2_dir(tenant_id, project_id, project.name)
     if not d.is_dir():
         return {"files": [], "folder": project.name}
     allowed = {".tif", ".tiff", ".jp2", ".zip", ".png", ".jpg", ".jpeg"}
@@ -594,7 +824,7 @@ def import_raster_from_downloads(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    src_dir = project_downloads_dir(tenant_id, project_id, project.name)
+    src_dir = project_sentinel2_dir(tenant_id, project_id, project.name)
     src = (src_dir / safe).resolve()
     base = src_dir.resolve()
     if not str(src).startswith(str(base)) or not src.is_file():

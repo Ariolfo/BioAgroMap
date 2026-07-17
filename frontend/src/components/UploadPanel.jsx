@@ -1,9 +1,12 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import ProjectStorageFolderPicker from "./ProjectStorageFolderPicker";
 
 export default function UploadPanel({
   token,
   projectId,
   loading,
+  defaultStartDate = "",
+  defaultEndDate = "",
   targetRasterId,
   setTargetRasterId,
   onUploadLote,
@@ -22,10 +25,18 @@ export default function UploadPanel({
 }) {
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
+  const [s1ImagesPerMonth, setS1ImagesPerMonth] = useState(0);
   const [s1AoiFile, setS1AoiFile] = useState(null);
   const [selectedLayerId, setSelectedLayerId] = useState("");
   const [uploadedLayerId, setUploadedLayerId] = useState("");
   const [loteMode, setLoteMode] = useState("existing");
+  const [downloadDestSubpath, setDownloadDestSubpath] = useState("");
+  const [destPickerOpen, setDestPickerOpen] = useState(false);
+
+  useEffect(() => {
+    setStartDate(defaultStartDate || "");
+    setEndDate(defaultEndDate || "");
+  }, [projectId, defaultStartDate, defaultEndDate]);
 
   const vectorLayers = mapLayers.filter((l) => l.kind === "vector");
   const hasVectorLayers = vectorLayers.length > 0;
@@ -33,11 +44,14 @@ export default function UploadPanel({
   const activeLayerId = loteMode === "existing" ? selectedLayerId : uploadedLayerId;
   const isSentinel2 = downloadSource === "sentinel-2";
   const isSentinel1 = downloadSource === "sentinel-1";
+  const needsExternalDest = isSentinel2 || isSentinel1;
   const sentinelDatesOk = !isSentinel2 && !isSentinel1 || (startDate && endDate);
   const hasVectorForDownload = activeLayerId || (isSentinel1 && s1AoiFile);
+  const hasDest = Boolean(downloadDestSubpath && String(downloadDestSubpath).startsWith("ext:"));
   const downloadDisabled =
     loading || !projectId || !token ||
     !sentinelDatesOk ||
+    (needsExternalDest && !hasDest) ||
     (isSentinel2 && !activeLayerId) ||
     (isSentinel1 && !hasVectorForDownload) ||
     (!isSentinel1 && !isSentinel2 && !activeLayerId);
@@ -54,9 +68,16 @@ export default function UploadPanel({
       isSentinel2 || isSentinel1 ? startDate : undefined,
       isSentinel2 || isSentinel1 ? endDate : undefined,
       activeLayerId,
-      isSentinel1 ? s1AoiFile : undefined
+      isSentinel1 ? s1AoiFile : undefined,
+      isSentinel1 ? s1ImagesPerMonth : undefined,
+      needsExternalDest ? downloadDestSubpath : undefined
     );
   }
+
+  const destLabel = downloadDestSubpath
+    ? String(downloadDestSubpath).replace(/^ext:/, "") || "(raíz Data_Bioagro)"
+    : "";
+  const sensorFolderHint = isSentinel1 ? "Sentinel1" : isSentinel2 ? "Sentinel2" : "";
 
   return (
     <>
@@ -145,6 +166,11 @@ export default function UploadPanel({
 
         {(isSentinel2 || isSentinel1) && (
           <div className="date-range-fields">
+            {defaultStartDate && defaultEndDate ? (
+              <p className="hint-msg date-range-hint">
+                Fechas del estudio del proyecto (puede modificarlas).
+              </p>
+            ) : null}
             <label>
               Fecha inicio
               <input
@@ -167,6 +193,36 @@ export default function UploadPanel({
         )}
 
         {isSentinel1 && (
+          <div className="s1-per-month-field">
+            <span className="s1-per-month-label">Imágenes por mes (misma órbita):</span>
+            <div className="s1-per-month-toggle" role="group" aria-label="Imágenes por mes">
+              {[1, 2, 3].map((n) => (
+                <button
+                  key={n}
+                  type="button"
+                  className={s1ImagesPerMonth === n ? "s1-per-month-btn active" : "s1-per-month-btn"}
+                  onClick={() => setS1ImagesPerMonth(n)}
+                  disabled={loading}
+                >
+                  {n}
+                </button>
+              ))}
+              <button
+                type="button"
+                className={s1ImagesPerMonth === 0 ? "s1-per-month-btn active" : "s1-per-month-btn"}
+                onClick={() => setS1ImagesPerMonth(0)}
+                disabled={loading}
+              >
+                Todas
+              </button>
+            </div>
+            <p className="hint-msg s1-per-month-hint">
+              En cada mes se eligen escenas separadas en el tiempo, de la misma órbita relativa.
+            </p>
+          </div>
+        )}
+
+        {isSentinel1 && (
           <div className="hint-msg" style={{ marginTop: "0.5rem" }}>
             <strong>AOI (opcional si ya usas la capa del paso 1):</strong> GeoJSON (
             <code>.geojson</code>) o shapefile en <code>.zip</code>. Si lo subes aquí, tiene prioridad
@@ -181,6 +237,37 @@ export default function UploadPanel({
             {s1AoiFile ? (
               <span className="status-msg">Archivo AOI: {s1AoiFile.name}</span>
             ) : null}
+          </div>
+        )}
+
+        {isSentinel2 && (
+          <p className="hint-msg" style={{ marginTop: "0.5rem" }}>
+            Criterios: cobertura del polígono ≥75% y nubosidad sobre el polígono &lt;25% (banda SCL, no
+            solo la nube de toda la escena).
+          </p>
+        )}
+
+        {needsExternalDest && (
+          <div className="hint-msg" style={{ marginTop: "0.75rem" }}>
+            <strong>Carpeta destino (Data_Bioagro):</strong> elige el lote/carpeta; se usará{" "}
+            <code>{sensorFolderHint}/</code> dentro (se crea si no existe).
+            <div style={{ marginTop: "0.4rem", display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+              <button
+                type="button"
+                className="rgb-gallery-btn-secondary"
+                disabled={loading}
+                onClick={() => setDestPickerOpen(true)}
+              >
+                Elegir carpeta en Data_Bioagro
+              </button>
+              {hasDest ? (
+                <span className="status-msg">
+                  Destino: <code>{destLabel}</code> → <code>{sensorFolderHint}/</code>
+                </span>
+              ) : (
+                <span className="warn-msg">Falta elegir carpeta de descarga.</span>
+              )}
+            </div>
           </div>
         )}
 
@@ -253,6 +340,22 @@ export default function UploadPanel({
           </div>
         )}
       </fieldset>
+
+      <ProjectStorageFolderPicker
+        open={destPickerOpen}
+        projectId={projectId}
+        token={token}
+        externalOnly
+        allowCreateFolder
+        title="Carpeta destino en Data_Bioagro"
+        initialPath={downloadDestSubpath || "ext:"}
+        confirmLabel="Usar esta carpeta para descargar"
+        onCancel={() => setDestPickerOpen(false)}
+        onSelect={(rel) => {
+          setDownloadDestSubpath(rel || "ext:");
+          setDestPickerOpen(false);
+        }}
+      />
 
       <fieldset className="step-fieldset">
         <legend>3) Subir raster</legend>

@@ -1,4 +1,4 @@
-"""Índices SAR a partir de sigma0 VV/VH (dB) en ENVI bajo ``s1prepoceso/``.
+"""Índices SAR a partir de sigma0 VV/VH (dB) en ENVI bajo ``s1preproceso/``.
 
 Los stacks multibanda de salida se escriben solo bajo ``tenant_*/project_*/s1indices/``
 (nunca en ``indices/``, reservado a índices Sentinel-2).
@@ -6,7 +6,7 @@ Los stacks multibanda de salida se escriben solo bajo ``tenant_*/project_*/s1ind
 
 from __future__ import annotations
 
-# Subcarpeta de almacenamiento bajo el proyecto (hermana de ``recortes/``, ``s1prepoceso/``, ``indices/``).
+# Subcarpeta de almacenamiento bajo el proyecto (hermana de ``recortes/``, ``s1preproceso/``, ``indices/``).
 S1_SAR_STACKS_ROOT_NAME = "s1indices"
 
 import json
@@ -18,7 +18,7 @@ import rasterio
 from rasterio.enums import Resampling
 from rasterio.warp import reproject
 
-from app.api.v1.helpers import _tenant_storage
+from app.api.v1.helpers import project_s1_preproceso_dir
 
 
 def _safe_relative_under(root: Path, p: Path) -> str | None:
@@ -51,10 +51,10 @@ def sort_key_from_s1_prep_path(path: Path) -> str:
 
 def discover_s1_prep_sar_scenes(tenant_id: int, project_id: int) -> list[dict]:
     """
-    Escenas con VV+VH en la misma carpeta ``*.data`` bajo ``s1prepoceso/``.
+    Escenas con VV+VH en la misma carpeta ``*.data`` bajo ``s1preproceso/``.
     Cada ítem: ``scene_vv_relpath``, ``scene_vh_relpath``, ``sort_key`` (ISO).
     """
-    root = _tenant_storage(tenant_id, project_id, "s1prepoceso")
+    root = project_s1_preproceso_dir(tenant_id, project_id)
     if not root.is_dir():
         return []
 

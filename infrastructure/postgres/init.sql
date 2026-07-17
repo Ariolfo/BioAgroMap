@@ -142,5 +142,21 @@ CREATE TABLE IF NOT EXISTS ai_results (
     created_at TIMESTAMP DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS project_landing_texts (
+    id SERIAL PRIMARY KEY,
+    project_id INT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    tenant_id INT NOT NULL REFERENCES tenants(id),
+    section_key VARCHAR(120) NOT NULL,
+    draft_body TEXT NOT NULL DEFAULT '',
+    published_body TEXT NOT NULL DEFAULT '',
+    updated_by_user_id INT REFERENCES users(id) ON DELETE SET NULL,
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    published_at TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE (project_id, section_key)
+);
+CREATE INDEX IF NOT EXISTS idx_project_landing_texts_project ON project_landing_texts (project_id);
+CREATE INDEX IF NOT EXISTS idx_project_landing_texts_section ON project_landing_texts (project_id, section_key);
+
 CREATE INDEX IF NOT EXISTS idx_layers_geom_gist ON layers USING GIST (geom);
 CREATE INDEX IF NOT EXISTS idx_raster_layers_rast_gist ON raster_layers USING GIST (st_convexhull(rast));

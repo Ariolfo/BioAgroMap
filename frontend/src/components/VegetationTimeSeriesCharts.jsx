@@ -270,6 +270,7 @@ function IndexChart({
   isS1Sar = false,
   activeSceneDate = null,
   chartHeight = 260,
+  headingOverride = null,
 }) {
   const W = 900;
   const H = Number(chartHeight) > 120 ? Number(chartHeight) : 260;
@@ -399,7 +400,13 @@ function IndexChart({
     <div className="vts-chart-block">
       <div className="vts-chart-heading">
         <h4 className="vts-chart-title">
-          {indexKey} <span className="vts-chart-scale-hint">(0–1)</span>
+          {headingOverride ? (
+            headingOverride
+          ) : (
+            <>
+              {indexKey} <span className="vts-chart-scale-hint">(0–1)</span>
+            </>
+          )}
         </h4>
         <button
           type="button"
@@ -587,6 +594,7 @@ export default function VegetationTimeSeriesCharts({
   onlyIndexKey = null,
   activeSceneDate = null,
   chartPixelHeight = null,
+  chartHeadingOverride = null,
 }) {
   const rawPoints = data?.points?.length ? [...data.points] : [];
   const dateFallback =
@@ -650,6 +658,7 @@ export default function VegetationTimeSeriesCharts({
           isS1Sar={isS1Sar}
           activeSceneDate={activeSceneDate}
           chartHeight={resolvedChartH}
+          headingOverride={chartHeadingOverride}
         />
       ))}
     </div>

@@ -45,6 +45,8 @@ export default function SensorTimelapseViewer({
   rgbEmptyMessage = "Sin recorte RGB para esta fecha.",
   opacity,
   onOpacity,
+  hideOpacityControl = false,
+  hideSceneCounter = false,
   onOpenClientVisualization,
   interactive = false,
   roiMode = false,
@@ -73,6 +75,10 @@ export default function SensorTimelapseViewer({
   const roiPointsSvg = roiPoints.map((p) => `${p.x * 100},${p.y * 100}`).join(" ");
   const roiHasShape = roiPoints.length > 0;
   const roiCanClose = roiPoints.length >= 3;
+  const showTimelineFoot =
+    !hideSceneCounter ||
+    !hideOpacityControl ||
+    typeof onOpenClientVisualization === "function";
 
   const mediaHandlers = useMemo(
     () =>
@@ -392,32 +398,38 @@ export default function SensorTimelapseViewer({
           onChange={(e) => onChangeFrameIdx(Number(e.target.value))}
           disabled={!frames.length}
         />
-        <div className="adv-viewer-foot">
-          <span>
-            Escena {frames.length ? currentIdx + 1 : 0}/{frames.length}
-          </span>
-          <label>
-            Opacidad
-            <input
-              type="range"
-              min={0.1}
-              max={1}
-              step={0.05}
-              value={opacity}
-              onChange={(e) => onOpacity(Number(e.target.value))}
-            />
-          </label>
-          {typeof onOpenClientVisualization === "function" ? (
-            <button
-              type="button"
-              className="adv-viewer-historic-btn"
-              onClick={() => onOpenClientVisualization()}
-              title="Abrir la ventana de visualización histórica (Sentinel-1, Sentinel-2, Alta resolución)"
-            >
-              Visual histórica
-            </button>
-          ) : null}
-        </div>
+        {showTimelineFoot ? (
+          <div className="adv-viewer-foot">
+            {!hideSceneCounter ? (
+              <span>
+                Escena {frames.length ? currentIdx + 1 : 0}/{frames.length}
+              </span>
+            ) : null}
+            {!hideOpacityControl ? (
+              <label>
+                Opacidad
+                <input
+                  type="range"
+                  min={0.1}
+                  max={1}
+                  step={0.05}
+                  value={opacity}
+                  onChange={(e) => onOpacity(Number(e.target.value))}
+                />
+              </label>
+            ) : null}
+            {typeof onOpenClientVisualization === "function" ? (
+              <button
+                type="button"
+                className="adv-viewer-historic-btn"
+                onClick={() => onOpenClientVisualization()}
+                title="Abrir la ventana de visualización histórica (Sentinel-1, Sentinel-2, Alta resolución)"
+              >
+                Visual histórica
+              </button>
+            ) : null}
+          </div>
+        ) : null}
       </div>
       {dualZoomOpen && dualPaneRgb ? (
         <div className="adv-viewer-zoom-overlay" role="dialog" aria-modal="true" aria-labelledby="adv-viewer-zoom-title">

@@ -83,6 +83,33 @@ def require_admin(user: User = Depends(get_current_user)) -> User:
     return user
 
 
+def assert_user_can_delete_project(db: Session, user: User, project: Project) -> None:
+    """Admin puede eliminar cualquier proyecto del tenant; cliente solo los suyos (dueño u orden vinculada)."""
+    role = str(user.role or "").strip().lower()
+    if role == "admin":
+        return
+    if role != "cliente":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No autorizado")
+    owner_id = getattr(project, "owner_user_id", None)
+    if owner_id is not None and int(owner_id) == int(user.id):
+        return
+    linked = (
+        db.query(StudyOrder)
+        .filter(
+            StudyOrder.user_id == user.id,
+            StudyOrder.project_id == project.id,
+            StudyOrder.tenant_id == user.tenant_id,
+        )
+        .first()
+    )
+    if linked:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="No tienes permiso para eliminar este proyecto.",
+    )
+
+
 def assert_cliente_can_view_published_dashboard(db: Session, user: User, project: Project) -> None:
     """Cliente solo ve datos de proyectos publicados y con vínculo (dueño u orden de estudio)."""
     role = str(user.role or "").strip().lower()

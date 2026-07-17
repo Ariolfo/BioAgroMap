@@ -67,6 +67,12 @@ def _is_cliente_allowed_request(request: Request) -> bool:
         or path.startswith(f"{settings.api_v1_prefix}/cluster-analysis/")
     ):
         return True
+    if method == "DELETE":
+        projects_prefix = f"{settings.api_v1_prefix}/projects/"
+        if path.startswith(projects_prefix):
+            project_id_part = path[len(projects_prefix) :].strip("/")
+            if project_id_part.isdigit():
+                return True
     if method == "POST" and path in (
         f"{settings.api_v1_prefix}/preprocess/vegetation-time-series",
         f"{settings.api_v1_prefix}/preprocess/s1-sar-time-series",

@@ -1,25 +1,36 @@
 """
 Sentinel-2 download service using Copernicus Data Space.
 Searches and downloads S2 L2A (MSIL2A) products month by month for a given WKT polygon.
-Only downloads products that cover >= 75% of the user's area of interest.
+
+Criteria before download:
+- footprint covers >= 75% of the AOI;
+- cloudiness over the AOI (from SCL_20m) is < 25%.
 """
 from __future__ import annotations
 
 import logging
 import os
+import tempfile
 from collections.abc import Callable
 from datetime import date
+from pathlib import Path
 
+import numpy as np
 import requests
 from dateutil.relativedelta import relativedelta
 from shapely import from_wkt
+from shapely.geometry import mapping
 
 logger = logging.getLogger(__name__)
 
 CATALOGUE_URL = "https://catalogue.dataspace.copernicus.eu/odata/v1/Products"
 TOKEN_URL = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
+STAC_SEARCH_URL = "https://stac.dataspace.copernicus.eu/v1/search"
 DATA_COLLECTION = "SENTINEL-2"
 MIN_COVERAGE = 0.75
+MAX_AOI_CLOUD = 0.25
+# Sen2Cor SCL: medium cloud, high cloud, thin cirrus (nubosidad).
+CLOUDY_SCL_CLASSES = frozenset({8, 9, 10})
 
 
 def _count_month_slots(start: date, end: date) -> int:
@@ -80,6 +91,152 @@ def _product_covers_area(product: dict, aoi_geom) -> bool:
     except Exception:
         logger.warning("Could not compute coverage, accepting product")
         return True
+
+
+def _product_identifier(product: dict) -> str:
+    return str(product.get("Name") or "").split(".")[0]
+
+
+def _odata_cloud_cover_pct(product: dict) -> float | None:
+    """Cloud cover de la escena completa (Attributes OData), 0–100. No es del polígono."""
+    attrs = product.get("Attributes") or []
+    for att in attrs:
+        if str(att.get("Name") or "").lower() == "cloudcover":
+            try:
+                return float(att.get("Value"))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _stac_scl_https_url(product_name: str, session: requests.Session) -> str | None:
+    """Resuelve URL HTTPS de ``SCL_20m`` vía STAC CDSE."""
+    identifier = str(product_name or "").split(".")[0]
+    if not identifier:
+        return None
+    body = {
+        "collections": ["sentinel-2-l2a"],
+        "ids": [identifier],
+        "limit": 1,
+    }
+    try:
+        r = session.post(STAC_SEARCH_URL, json=body, timeout=60)
+        r.raise_for_status()
+        feats = r.json().get("features") or []
+        if not feats:
+            # Fallback por filtro de id (algunos ítems no matchean ``ids`` exacto).
+            body2 = {
+                "collections": ["sentinel-2-l2a"],
+                "limit": 1,
+                "filter": {
+                    "op": "eq",
+                    "args": [{"property": "id"}, identifier],
+                },
+                "filter-lang": "cql2-json",
+            }
+            r2 = session.post(STAC_SEARCH_URL, json=body2, timeout=60)
+            r2.raise_for_status()
+            feats = r2.json().get("features") or []
+        if not feats:
+            return None
+        asset = (feats[0].get("assets") or {}).get("SCL_20m") or {}
+        alt = (asset.get("alternate") or {}).get("https") or {}
+        href = alt.get("href") or asset.get("href")
+        if href and str(href).startswith("http"):
+            return str(href)
+    except Exception:
+        logger.exception("STAC SCL lookup failed for %s", identifier)
+    return None
+
+
+def aoi_cloud_fraction_from_scl(scl_path: str | Path, aoi_geom) -> float | None:
+    """
+    Fracción de nubosidad (0–1) del AOI usando SCL Sen2Cor.
+    Nubes = clases 8, 9, 10. Denominador = píxeles del AOI con SCL != 0.
+    """
+    import rasterio
+    from rasterio.mask import mask as rio_mask
+    from rasterio.warp import transform_geom
+
+    path = Path(scl_path)
+    if not path.is_file():
+        return None
+    try:
+        with rasterio.open(path) as src:
+            geom = aoi_geom
+            if not geom.is_valid:
+                geom = geom.buffer(0)
+            # AOI llega en WGS84; SCL suele estar en UTM del tile.
+            dst_crs = src.crs
+            if dst_crs is None:
+                return None
+            geom_json = mapping(geom)
+            if str(dst_crs).upper() not in {"EPSG:4326", "OGC:CRS84"}:
+                geom_json = transform_geom("EPSG:4326", dst_crs, geom_json, precision=6)
+            out, _ = rio_mask(src, [geom_json], crop=True, filled=True, nodata=0)
+            arr = np.asarray(out[0])
+            valid = arr != 0
+            n_valid = int(valid.sum())
+            if n_valid <= 0:
+                return None
+            cloudy = np.isin(arr, list(CLOUDY_SCL_CLASSES)) & valid
+            return float(cloudy.sum()) / float(n_valid)
+    except Exception:
+        logger.exception("Failed AOI cloud fraction from SCL %s", path)
+        return None
+
+
+def _product_aoi_cloud_ok(
+    product: dict,
+    aoi_geom,
+    session: requests.Session,
+) -> tuple[bool, float | None, str]:
+    """
+    True si nubosidad del polígono < 25%.
+    Descarga solo SCL_20m (~MB) y enmascara al AOI.
+    Si no se puede calcular SCL: fallback a cloudCover de escena < 25%.
+    """
+    identifier = _product_identifier(product)
+    href = _stac_scl_https_url(identifier, session)
+    if href:
+        tmp_path: Path | None = None
+        try:
+            r = session.get(href, allow_redirects=True, timeout=180)
+            r.raise_for_status()
+            fd, name = tempfile.mkstemp(suffix="_SCL_20m.jp2")
+            os.close(fd)
+            tmp_path = Path(name)
+            tmp_path.write_bytes(r.content)
+            frac = aoi_cloud_fraction_from_scl(tmp_path, aoi_geom)
+            if frac is not None:
+                logger.info(
+                    "AOI cloud cover for %s: %.1f%% (threshold < %.0f%%)",
+                    identifier,
+                    frac * 100,
+                    MAX_AOI_CLOUD * 100,
+                )
+                return frac < MAX_AOI_CLOUD, frac, "scl_aoi"
+        except Exception:
+            logger.exception("SCL download/check failed for %s", identifier)
+        finally:
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    scene_pct = _odata_cloud_cover_pct(product)
+    if scene_pct is not None:
+        frac = scene_pct / 100.0
+        logger.warning(
+            "Using scene cloudCover=%.1f%% as fallback for %s (SCL AOI unavailable)",
+            scene_pct,
+            identifier,
+        )
+        return frac < MAX_AOI_CLOUD, frac, "scene_cloudcover"
+
+    logger.warning("No cloud metric for %s; skipping download", identifier)
+    return False, None, "unavailable"
 
 
 def download_product(
@@ -147,12 +304,17 @@ def search_and_download_monthly(
     copernicus_password: str,
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> dict:
-    """Download S2 L2A (MSIL2A) products per month that cover >=75% of the WKT area."""
+    """
+    Download all S2 L2A (MSIL2A) products per month that:
+    - cover >=75% of the WKT area, and
+    - have <25% cloudiness over the AOI (SCL).
+    """
     os.makedirs(output_dir, exist_ok=True)
     total_downloaded = 0
     total_size_mb = 0
     downloaded_files: list[str] = []
     skipped_low_coverage = 0
+    skipped_high_cloud = 0
 
     aoi_geom = from_wkt(wkt_polygon)
     if not aoi_geom.is_valid:
@@ -194,6 +356,7 @@ def search_and_download_monthly(
                 f" and OData.CSC.Intersects(area=geography'SRID=4326;{wkt_polygon}')"
                 f" and ContentDate/Start ge {start_str}T00:00:00.000Z"
                 f" and ContentDate/Start lt {end_str}T00:00:00.000Z"
+                f"&$expand=Attributes"
                 f"&$count=True&$top=1000"
             )
             resp = session.get(query_url, timeout=60)
@@ -209,26 +372,43 @@ def search_and_download_monthly(
 
             if not s2_l2a_products:
                 logger.info("No S2 L2A (MSIL2A) products for %s", start_str)
+                month_index += 1
                 current = next_month
                 continue
 
             s2_l2a_products.sort(key=lambda p: p["ContentDate"]["Start"])
 
-            downloaded_this_month = False
-            for product in s2_l2a_products:
+            downloaded_this_month = 0
+            n_products = len(s2_l2a_products)
+            for pi, product in enumerate(s2_l2a_products):
                 if not _product_covers_area(product, aoi_geom):
                     skipped_low_coverage += 1
                     continue
 
+                identifier = _product_identifier(product)
+                _report(f"Verificando nubosidad AOI: {identifier}...", 0.22 + 0.05 * ((pi + 1) / max(n_products, 1)))
+                ok_cloud, cloud_frac, cloud_src = _product_aoi_cloud_ok(product, aoi_geom, session)
+                if not ok_cloud:
+                    skipped_high_cloud += 1
+                    logger.info(
+                        "Skip %s: AOI cloud %.1f%% (src=%s) >= %.0f%%",
+                        identifier,
+                        (cloud_frac or 0) * 100,
+                        cloud_src,
+                        MAX_AOI_CLOUD * 100,
+                    )
+                    continue
+
                 prod_id = product["Id"]
-                identifier = product["Name"].split(".")[0]
 
                 expected_file = os.path.join(output_dir, f"{identifier}.zip")
                 if os.path.exists(expected_file):
                     logger.info("Already exists: %s", identifier)
                     downloaded_files.append(expected_file)
+                    downloaded_this_month += 1
                 else:
-                    _report(f"Descargando {identifier}...", 0.5)
+                    sub = 0.25 + 0.7 * ((pi + 1) / max(n_products, 1))
+                    _report(f"Descargando {identifier}...", sub)
                     zip_path = download_product(
                         prod_id,
                         identifier,
@@ -241,12 +421,21 @@ def search_and_download_monthly(
                         total_downloaded += 1
                         total_size_mb += file_size
                         downloaded_files.append(zip_path)
+                        downloaded_this_month += 1
 
-                downloaded_this_month = True
-                break
-
-            if not downloaded_this_month:
-                logger.info("No product with >=75%% coverage for %s", start_str)
+            if downloaded_this_month == 0:
+                logger.info(
+                    "No product for %s with coverage>=75%% and AOI cloud<%.0f%%",
+                    start_str,
+                    MAX_AOI_CLOUD * 100,
+                )
+            else:
+                logger.info(
+                    "Month %s: %d product(s) kept (coverage>=75%%, AOI cloud<%.0f%%)",
+                    start_str,
+                    downloaded_this_month,
+                    MAX_AOI_CLOUD * 100,
+                )
 
         except Exception:
             logger.exception("Error downloading S2 for %s", start_str)
@@ -261,4 +450,5 @@ def search_and_download_monthly(
         "total_size_mb": total_size_mb,
         "files": downloaded_files,
         "skipped_low_coverage": skipped_low_coverage,
+        "skipped_high_cloud": skipped_high_cloud,
     }

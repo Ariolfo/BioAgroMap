@@ -171,6 +171,61 @@ def _pick_dominant_orbit_descending(
     return best_rel, best_od, filtered
 
 
+def _acq_sort_key(feat: dict[str, Any]) -> datetime:
+    return _parse_acquisition_dt(feat.get("properties") or {}) or datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _select_spaced_in_month(sorted_feats: list[dict[str, Any]], k: int) -> list[dict[str, Any]]:
+    """Elige k escenas dentro del mes, lo más separadas posible en el tiempo."""
+    n = len(sorted_feats)
+    if k <= 0 or k >= n:
+        return list(sorted_feats)
+    if k == 1:
+        return [sorted_feats[n // 2]]
+    indices = [round(i * (n - 1) / (k - 1)) for i in range(k)]
+    picked: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for idx in indices:
+        if idx in seen:
+            continue
+        seen.add(idx)
+        picked.append(sorted_feats[idx])
+    return picked
+
+
+def filter_images_per_month(
+    features: list[dict[str, Any]],
+    images_per_month: int | None,
+) -> list[dict[str, Any]]:
+    """
+    Agrupa por mes calendario y conserva hasta ``images_per_month`` escenas por mes,
+    distribuidas uniformemente en el tiempo. ``None`` o ``<= 0`` conserva todas.
+    """
+    if not features:
+        return []
+    if not images_per_month or images_per_month <= 0:
+        return sorted(features, key=_acq_sort_key)
+
+    from collections import defaultdict
+
+    by_month: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
+    undated: list[dict[str, Any]] = []
+    for feat in features:
+        dt = _parse_acquisition_dt(feat.get("properties") or {})
+        if dt:
+            by_month[(dt.year, dt.month)].append(feat)
+        else:
+            undated.append(feat)
+
+    selected: list[dict[str, Any]] = []
+    for month_key in sorted(by_month.keys()):
+        month_feats = sorted(by_month[month_key], key=_acq_sort_key)
+        selected.extend(_select_spaced_in_month(month_feats, int(images_per_month)))
+    selected.extend(undated)
+    selected.sort(key=_acq_sort_key)
+    return selected
+
+
 def _extract_product_uuid_from_stac_feature(feat: dict[str, Any]) -> str | None:
     """UUID desde _private, enlaces del ítem o href de assets (p. ej. Product → OData)."""
     props = feat.get("properties") or {}
@@ -341,6 +396,7 @@ def search_filter_and_download(
     copernicus_user: str,
     copernicus_password: str,
     progress_callback: Callable[[int, int, str], None] | None = None,
+    images_per_month: int | None = None,
 ) -> dict[str, Any]:
     """
     project_downloads_root: carpeta de descargas del proyecto (slug).
@@ -375,12 +431,17 @@ def search_filter_and_download(
             continue
         candidates.append(feat)
 
-    rel, od, to_download = _pick_dominant_orbit_descending(candidates)
+    rel, od, orbit_feats = _pick_dominant_orbit_descending(candidates)
     pass_short = _pass_short(od)
+    to_download = filter_images_per_month(orbit_feats, images_per_month)
+    if not to_download:
+        raise ValueError("No quedaron productos Sentinel-1 tras aplicar el filtro de imágenes por mes.")
 
+    per_month_label = "todas" if not images_per_month or images_per_month <= 0 else str(images_per_month)
     _report(
         f"Solo órbita descendente. Órbita relativa seleccionada: {rel} ({pass_short}). "
-        f"Productos a descargar: {len(to_download)}.",
+        f"Imágenes por mes: {per_month_label}. "
+        f"Productos a descargar: {len(to_download)} de {len(orbit_feats)} en esa órbita.",
         15,
     )
 
@@ -464,6 +525,7 @@ def search_filter_and_download(
 
     summary = (
         f"Sentinel-1: {downloaded} imagen(es) en órbita relativa {rel} ({od.upper()}, {pass_short}). "
+        f"Imágenes por mes: {per_month_label}. "
         f"Rango fechas (adquisición): {tmin} → {tmax}. CSV: {csv_path.name}"
     )
     _report(summary, 99)
@@ -474,6 +536,8 @@ def search_filter_and_download(
         "selected_relative_orbit": rel,
         "selected_orbit_direction": od,
         "selected_pass_short": pass_short,
+        "images_per_month": 0 if not images_per_month or images_per_month <= 0 else int(images_per_month),
+        "orbit_candidate_count": len(orbit_feats),
         "date_range_start": tmin,
         "date_range_end": tmax,
         "csv_path": str(csv_path),

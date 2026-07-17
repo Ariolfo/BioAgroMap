@@ -107,6 +107,9 @@ export default function App() {
   const normalizedUserRole = normalizeUserRole(userRole);
   const isAdmin = normalizedUserRole === "admin";
   const isCliente = normalizedUserRole === "cliente";
+  const selectedProject = projects.find((p) => Number(p.id) === Number(projectId));
+  const projectStudyDateStart = selectedProject?.study_date_start?.slice(0, 10) || "";
+  const projectStudyDateEnd = selectedProject?.study_date_end?.slice(0, 10) || "";
 
   const finalizeStudyPolygon = useCallback(() => {
     setStudyDraw((d) => {
@@ -178,22 +181,35 @@ export default function App() {
   useEffect(() => {
     if (!token) {
       setUserRole("");
+      setProjects([]);
       return;
     }
     let cancelled = false;
-    const loadMe = async () => {
+    const restoreSession = async () => {
       try {
         setAuthToken(token);
-        const res = await api.get("/auth/me");
-        if (!cancelled) setUserRole(normalizeUserRole(res.data?.role));
+        const [meRes, projectList] = await Promise.all([
+          api.get("/auth/me"),
+          fetchProjects(token),
+        ]);
+        if (cancelled) return;
+        setUserRole(normalizeUserRole(meRes.data?.role));
+        if (meRes.data?.email) setEmail(meRes.data.email);
+        const restoreId = location.state?.restoreProjectId;
+        if (restoreId && (projectList || []).some((p) => Number(p.id) === Number(restoreId))) {
+          await selectProject(Number(restoreId), token);
+          navigate(location.pathname || "/app", { replace: true, state: {} });
+        }
       } catch (_) {
         if (!cancelled) setUserRole("");
       }
     };
-    loadMe();
+    void restoreSession();
     return () => {
       cancelled = true;
     };
+    // Solo al restaurar/cambiar token; location.state se lee una vez aquí.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
 
   useEffect(() => {
@@ -247,9 +263,11 @@ export default function App() {
           };
         });
         if (st === "completed") {
-          setMessage(
-            `Sentinel-2: descarga terminada.${r.data.total_downloaded != null ? ` Archivos: ${r.data.total_downloaded}.` : ""}`
-          );
+          const parts = [`Sentinel-2: descarga terminada.`];
+          if (r.data.total_downloaded != null) parts.push(` Archivos: ${r.data.total_downloaded}.`);
+          if (r.data.skipped_high_cloud != null) parts.push(` Omitidas por nube AOI: ${r.data.skipped_high_cloud}.`);
+          if (r.data.skipped_low_coverage != null) parts.push(` Omitidas por cobertura: ${r.data.skipped_low_coverage}.`);
+          setMessage(parts.join(""));
         } else if (st === "failed") {
           setMessage(`Sentinel-2: ${r.data.message || "Error"}`);
         }
@@ -508,7 +526,7 @@ export default function App() {
           setMessage(
             Object.keys(outs).length > 0
               ? `Stacks de índices SAR listos (${result.scene_count ?? "?"} escenas). ${parts.join(" | ")}${errTxt}`
-              : `${result.message || "Sin archivos de salida; comprueba s1prepoceso/ (VV+VH dB)."}${errTxt}`
+              : `${result.message || "Sin archivos de salida; comprueba s1preproceso/ (VV+VH dB)."}${errTxt}`
           );
           if (Object.keys(outs).length > 0) {
             setStackMode("visual-s1-sar-indices");
@@ -725,7 +743,10 @@ export default function App() {
   }
 
   async function deleteProject(id) {
-    if (!requireAdminAction()) return;
+    if (!token) {
+      setMessage("Debes iniciar sesion.");
+      return;
+    }
     const proj = projects.find((p) => p.id === id);
     const projName = proj ? proj.name : `ID ${id}`;
     if (!window.confirm(`Eliminar el proyecto "${projName}" y todas sus capas?`)) return;
@@ -1060,10 +1081,24 @@ export default function App() {
     }
   }
 
-  async function preprocessDownload(startDate, endDate, layerId, s1AoiFile) {
+  async function preprocessDownload(
+    startDate,
+    endDate,
+    layerId,
+    s1AoiFile,
+    s1ImagesPerMonth = 0,
+    downloadSubpath
+  ) {
     if (!requireAdminAction()) return;
     if (!token || !projectId) {
       setMessage("Error: debes iniciar sesion y crear proyecto.");
+      return;
+    }
+    if (
+      (downloadSource === "sentinel-1" || downloadSource === "sentinel-2") &&
+      !(downloadSubpath && String(downloadSubpath).startsWith("ext:"))
+    ) {
+      setMessage("Error: elige la carpeta de destino en Data_Bioagro.");
       return;
     }
     setLoading(true);
@@ -1081,6 +1116,8 @@ export default function App() {
         if (s1AoiFile) {
           fd.append("aoi_file", s1AoiFile);
         }
+        fd.append("images_per_month", String(Number(s1ImagesPerMonth) || 0));
+        fd.append("download_subpath", String(downloadSubpath));
         const res = await api.post("/preprocess/sentinel1-download", fd);
         if (res.data.status === "downloading") {
           setS1Download({
@@ -1090,7 +1127,11 @@ export default function App() {
             message: "Iniciando descarga Sentinel-1 (GRD IW, Copernicus)…",
             ui_status: "downloading",
           });
-          setMessage(`Descarga Sentinel-1 en curso (registro #${res.data.raster_layer_id})`);
+          setMessage(
+            `Descarga Sentinel-1 en curso (registro #${res.data.raster_layer_id})${
+              res.data.output_dir ? ` → ${res.data.output_dir}` : ""
+            }`
+          );
         }
         return;
       }
@@ -1102,6 +1143,7 @@ export default function App() {
       if (downloadSource === "sentinel-2") {
         body.start_date = startDate;
         body.end_date = endDate;
+        body.download_subpath = String(downloadSubpath);
       }
       if (layerId) {
         body.layer_id = Number(layerId);
@@ -1119,7 +1161,11 @@ export default function App() {
           message: "Iniciando descarga Sentinel-2...",
           ui_status: "downloading",
         });
-        setMessage(`Descarga Sentinel-2 en curso (raster #${res.data.raster_layer_id})`);
+        setMessage(
+          `Descarga Sentinel-2 en curso (raster #${res.data.raster_layer_id})${
+            res.data.output_dir ? ` → ${res.data.output_dir}` : ""
+          }`
+        );
       } else if (res.data.status === "downloading") {
         setMessage(`Descarga iniciada. Raster ID: ${res.data.raster_layer_id}`);
       } else {
@@ -1183,7 +1229,7 @@ export default function App() {
     }
   }
 
-  async function runS1GrdRecortes(layerId, productPaths) {
+  async function runS1GrdRecortes(layerId, productPaths, sourceSubpath) {
     if (!requireAdminAction()) return false;
     if (!token || !projectId) {
       setMessage("Error: inicia sesion y selecciona un proyecto.");
@@ -1204,6 +1250,9 @@ export default function App() {
         project_id: Number(projectId),
         product_paths: paths,
       };
+      if (sourceSubpath !== undefined) {
+        body.source_subpath = sourceSubpath;
+      }
       if (layerId != null && layerId !== "") {
         const n = Number(layerId);
         if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
@@ -1229,7 +1278,7 @@ export default function App() {
     }
   }
 
-  async function runPsPlanetExtract() {
+  async function runPsPlanetExtract(sourceSubpath) {
     if (!requireAdminAction()) return false;
     if (!token || !projectId) {
       setMessage("Error: inicia sesión y selecciona un proyecto.");
@@ -1239,9 +1288,11 @@ export default function App() {
     setMessage("");
     try {
       setAuthToken(token);
-      const res = await api.post("/preprocess/ps-planetscope-zip-extract", {
-        project_id: Number(projectId),
-      });
+      const body = { project_id: Number(projectId) };
+      if (sourceSubpath !== undefined) {
+        body.source_subpath = sourceSubpath;
+      }
+      const res = await api.post("/preprocess/ps-planetscope-zip-extract", body);
       setPsExtractTaskId(res.data.task_id);
       setMessage(`Extracción Planet PS en cola (tarea ${res.data.task_id}).`);
     } catch (error) {
@@ -1319,7 +1370,7 @@ export default function App() {
       return;
     }
     if (!paths.length) {
-      setMessage("Selecciona al menos una escena (miniatura) con par VV+VH en s1prepoceso/.");
+      setMessage("Selecciona al menos una escena (miniatura) con par VV+VH en s1preproceso/.");
       return;
     }
     setLoading(true);
@@ -1474,6 +1525,8 @@ export default function App() {
         projects={projects}
         projectId={projectId}
         projectName={projectName}
+        projectStudyDateStart={projectStudyDateStart}
+        projectStudyDateEnd={projectStudyDateEnd}
         setProjectName={setProjectName}
         mapLayers={mapLayers}
         targetRasterId={targetRasterId}
@@ -1512,6 +1565,24 @@ export default function App() {
             return;
           }
           setDashboardOpen(true);
+        }}
+        onOpenClientLanding={() => {
+          if (!projectId) {
+            setMessage("Seleccione un proyecto en la lista para abrir el informe narrativo.");
+            return;
+          }
+          navigate(`/cliente/${projectId}`);
+        }}
+        onOpenAdminLanding={() => {
+          if (!isAdmin) {
+            setMessage("Acceso restringido: informe narrativo de edición solo para admin.");
+            return;
+          }
+          if (!projectId) {
+            setMessage("Seleccione un proyecto en la lista para editar el informe narrativo.");
+            return;
+          }
+          navigate(`/admin/informe/${projectId}`);
         }}
         onOpenClientVisualization={() => setClientVizModalOpen(true)}
         onOpenSmartCluster={() => {

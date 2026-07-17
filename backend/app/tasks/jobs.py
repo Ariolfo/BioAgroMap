@@ -248,6 +248,7 @@ def download_sentinel2(
                 "total_size_mb": result["total_size_mb"],
                 "files": [str(f) for f in result["files"]],
                 "skipped_low_coverage": result.get("skipped_low_coverage", 0),
+                "skipped_high_cloud": result.get("skipped_high_cloud", 0),
                 "progress": 100,
                 "progress_message": "Descarga terminada",
             }
@@ -274,6 +275,7 @@ def download_sentinel1(
     project_downloads_root: str,
     raster_layer_id: int,
     db_url: str,
+    images_per_month: int = 0,
 ) -> dict:
     from pathlib import Path
 
@@ -307,6 +309,7 @@ def download_sentinel1(
             copernicus_user,
             copernicus_password,
             progress_callback=progress_cb,
+            images_per_month=images_per_month,
         )
     except Exception as exc:
         logger.exception("Sentinel-1 download failed")
@@ -344,6 +347,8 @@ def download_sentinel1(
                 "selected_relative_orbit": result.get("selected_relative_orbit"),
                 "selected_orbit_direction": result.get("selected_orbit_direction"),
                 "selected_pass_short": result.get("selected_pass_short"),
+                "images_per_month": result.get("images_per_month"),
+                "orbit_candidate_count": result.get("orbit_candidate_count"),
                 "date_range_start": result.get("date_range_start"),
                 "date_range_end": result.get("date_range_end"),
                 "csv_path": result.get("csv_path"),
@@ -381,7 +386,11 @@ def s2_l2a_recortes_pipeline(
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 
-    from app.api.v1.helpers import _tenant_storage, project_downloads_dir
+    from app.api.v1.helpers import (
+        _tenant_storage,
+        project_sentinel2_dir,
+        resolve_source_subpath,
+    )
     from app.models.models import RasterLayer
     from app.services.combine_s2_bands import (
         S2_RECORTE_SIX_BAND_ORDER,
@@ -409,26 +418,12 @@ def s2_l2a_recortes_pipeline(
         if not wkt:
             return {"ok": False, "error": "no_wkt", "message": "No hay polígono en el proyecto."}
 
-        from app.core.config import settings as app_settings
-
         if source_subpath is None:
-            downloads = project_downloads_dir(tenant_id, project_id, project_name)
+            downloads = project_sentinel2_dir(tenant_id, project_id, project_name)
         else:
-            pr = (
-                Path(app_settings.storage_path).resolve() / f"tenant_{tenant_id}" / f"project_{project_id}"
-            ).resolve()
-            rel = (source_subpath or "").strip().replace("\\", "/")
-            parts = [x for x in rel.split("/") if x and x != "."]
-            cur = pr
-            for part in parts:
-                if part == "..":
-                    return {"ok": False, "error": "bad_path", "message": "Ruta inválida"}
-                cur = (cur / part).resolve()
-            try:
-                cur.relative_to(pr)
-            except ValueError:
-                return {"ok": False, "error": "bad_path", "message": "Ruta fuera del proyecto"}
-            downloads = cur
+            downloads = resolve_source_subpath(tenant_id, project_id, source_subpath)
+            if downloads is None:
+                return {"ok": False, "error": "bad_path", "message": "Ruta de origen inválida o fuera del alcance permitido"}
         if not downloads.is_dir():
             return {
                 "ok": False,
@@ -616,15 +611,17 @@ def s1_grd_recortes_pipeline(
     layer_id: int | None,
     db_url: str,
     product_paths: list[str],
+    source_subpath: str | None = None,
 ) -> dict:
     """
-    Por cada producto Sentinel-1 (.SAFE o .zip bajo ``Sentinel1/``): apila VV+VH, recorte al polígono
+    Por cada producto Sentinel-1 (.SAFE o .zip bajo la carpeta origen): apila VV+VH, recorte al polígono
     (subset espacial equivalente a SNAP), salida en ``recortes/S1/`` y capa raster.
+    Por defecto la carpeta origen es ``downloads/<slug>/Sentinel1/``.
     """
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 
-    from app.api.v1.helpers import _tenant_storage, project_downloads_dir
+    from app.api.v1.helpers import _tenant_storage, project_sentinel1_dir, resolve_source_subpath
     from app.models.models import Layer, RasterLayer
     from app.services.project_geometry import wkt_union_from_project_layers
     from app.services.raster_geo import bounds_wgs84_from_path
@@ -650,13 +647,23 @@ def s1_grd_recortes_pipeline(
             if lyr_aoi:
                 aoi_layer_name = lyr_aoi.name
 
-        sentinel1_root = project_downloads_dir(tenant_id, project_id, project_name) / "Sentinel1"
+        if source_subpath is None:
+            sentinel1_root = project_sentinel1_dir(tenant_id, project_id, project_name)
+        else:
+            sentinel1_root = resolve_source_subpath(tenant_id, project_id, source_subpath)
+            if sentinel1_root is None:
+                return {
+                    "ok": False,
+                    "error": "bad_path",
+                    "message": "Ruta de origen inválida o fuera del alcance permitido",
+                    "pipeline": "s1_grd",
+                }
         sentinel1_resolved = sentinel1_root.resolve()
         if not sentinel1_root.is_dir():
             return {
                 "ok": False,
                 "error": "no_sentinel1_dir",
-                "message": f"No existe la carpeta Sentinel-1: {sentinel1_root}",
+                "message": f"No existe la carpeta de origen Sentinel-1: {sentinel1_root}",
                 "pipeline": "s1_grd",
             }
 
@@ -687,7 +694,7 @@ def s1_grd_recortes_pipeline(
         for rel in raw_paths:
             path = _resolve_under_s1(rel)
             if path is None:
-                errors.append(f"{rel}: ruta inválida o fuera de Sentinel1/")
+                errors.append(f"{rel}: ruta inválida o fuera de la carpeta origen")
                 continue
             if not path.exists():
                 errors.append(f"{rel}: no existe")
@@ -982,12 +989,12 @@ def s1_sar_index_stacks_pipeline(
 ) -> dict:
     """
     Por cada índice SAR (RVI, RFDI, …): stack multibanda en ``s1indices/<INDICE>/``,
-    una banda por escena (orden cronológico), desde ``Sigma0_VV_db.img`` + ``Sigma0_VH_db.img`` en ``s1prepoceso/``.
+    una banda por escena (orden cronológico), desde ``Sigma0_VV_db.img`` + ``Sigma0_VH_db.img`` en ``s1preproceso/``.
     """
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 
-    from app.api.v1.helpers import _tenant_storage
+    from app.api.v1.helpers import _tenant_storage, project_s1_preproceso_dir
     from app.models.models import RasterLayer
     from app.services.s1_sar_indices import (
         S1_SAR_STACKS_ROOT_NAME,
@@ -1006,13 +1013,13 @@ def s1_sar_index_stacks_pipeline(
     errors: list[dict[str, str]] = []
 
     try:
-        prep_root = _tenant_storage(tenant_id, project_id, "s1prepoceso")
+        prep_root = project_s1_preproceso_dir(tenant_id, project_id)
         all_scenes = discover_s1_prep_sar_scenes(tenant_id, project_id)
         if not all_scenes:
             return {
                 "ok": False,
                 "error": "no_scenes",
-                "message": "No hay escenas VV+VH en s1prepoceso/ (pares Sigma0_VV_db.img y Sigma0_VH_db.img en la misma carpeta).",
+                "message": "No hay escenas VV+VH en s1preproceso/ (pares Sigma0_VV_db.img y Sigma0_VH_db.img en la misma carpeta).",
                 "outputs": {},
                 "errors": [],
             }
@@ -1024,7 +1031,7 @@ def s1_sar_index_stacks_pipeline(
             return {
                 "ok": False,
                 "error": "no_matching_scenes",
-                "message": "Ninguna de las escenas seleccionadas coincide con pares VV+VH en s1prepoceso/.",
+                "message": "Ninguna de las escenas seleccionadas coincide con pares VV+VH en s1preproceso/.",
                 "outputs": {},
                 "errors": [],
             }
@@ -1106,15 +1113,30 @@ def s1_sar_index_stacks_pipeline(
 
 
 @celery_app.task(name="tasks.ps_planet_zip_extract_pipeline")
-def ps_planet_zip_extract_pipeline(tenant_id: int, project_id: int) -> dict:
+def ps_planet_zip_extract_pipeline(
+    tenant_id: int,
+    project_id: int,
+    source_subpath: str | None = None,
+) -> dict:
     """
-    Lee ``*.zip`` en ``rasterPS/``, extrae ``composite.tif`` y XML hermanos a ``recortesPS/``,
-    renombrando el composite a ``PS_dd-mm-yy.tif`` según prefijo YYYYMMDD_ en un XML.
+    Lee ``*.zip`` en la carpeta origen (por defecto ``rasterPS/``), extrae ``composite.tif`` y XML
+    hermanos a ``recortesPS/``, renombrando el composite a ``PS_dd-mm-yy.tif`` según prefijo YYYYMMDD_
+    en un XML.
     """
-    from app.api.v1.helpers import _tenant_storage
+    from app.api.v1.helpers import _tenant_storage, resolve_source_subpath
     from app.services.planet_ps_extract import extract_planet_zips_from_raster_ps
     from app.services.preprocess_pipeline_variant import planet_zip_dir_name
 
-    raster_root = _tenant_storage(tenant_id, project_id, planet_zip_dir_name())
+    if source_subpath is None:
+        raster_root = _tenant_storage(tenant_id, project_id, planet_zip_dir_name())
+    else:
+        raster_root = resolve_source_subpath(tenant_id, project_id, source_subpath)
+        if raster_root is None:
+            return {
+                "ok": False,
+                "error": "bad_path",
+                "message": "Ruta de origen inválida o fuera del alcance permitido",
+                "pipeline": "ps_planet_zip_extract",
+            }
     out_root = _tenant_storage(tenant_id, project_id, "recortesPS")
     return extract_planet_zips_from_raster_ps(raster_root, out_root)

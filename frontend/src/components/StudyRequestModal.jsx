@@ -293,7 +293,9 @@ export default function StudyRequestModal({
                   </div>
                 ) : null}
                 <h4>Opción A: Subir polígono</h4>
-                <p className="study-option-meta">KML, KMZ, shapefile (.zip con .shp/.dbf/.shx) o GeoJSON</p>
+                <p className="study-option-meta">
+                  KML, KMZ, GeoJSON o shapefile en .zip (incluya .shp, .dbf y .shx; pueden estar en una subcarpeta)
+                </p>
                 <label className={`study-file-btn${fileBusy ? " study-file-btn--disabled" : ""}`}>
                   {fileBusy ? "Procesando…" : "Elegir archivo"}
                   <input type="file" accept=".kml,.kmz,.zip,.shp,.geojson,.json" hidden disabled={fileBusy} onChange={onPickFile} />

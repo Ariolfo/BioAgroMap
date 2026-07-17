@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, require_admin, tenant_from_jwt
+from app.api.deps import assert_user_can_delete_project, get_current_user, require_admin, tenant_from_jwt
 from app.core.order_email import send_study_order_notification
 from app.core.config import settings
 from app.db.session import get_db
@@ -112,9 +112,21 @@ def list_projects(db: Session = Depends(get_db), user: User = Depends(get_curren
             ),
         )
     projects = q.order_by(Project.id.desc()).all()
+    orders_by_project: dict[int, StudyOrder] = {}
+    project_ids = [p.id for p in projects]
+    if project_ids:
+        for order in (
+            db.query(StudyOrder)
+            .filter(StudyOrder.project_id.in_(project_ids))
+            .order_by(StudyOrder.project_id, StudyOrder.created_at.desc())
+            .all()
+        ):
+            if order.project_id is not None and order.project_id not in orders_by_project:
+                orders_by_project[int(order.project_id)] = order
     out = []
     for p in projects:
         owner = db.query(User).filter(User.id == p.owner_user_id).first() if p.owner_user_id else None
+        order = orders_by_project.get(p.id)
         out.append(
             {
                 "id": p.id,
@@ -124,6 +136,8 @@ def list_projects(db: Session = Depends(get_db), user: User = Depends(get_curren
                 "status": p.status,
                 "created_at": p.created_at.isoformat() if p.created_at else None,
                 "published_at": p.published_at.isoformat() if p.published_at else None,
+                "study_date_start": order.study_date_start.isoformat() if order and order.study_date_start else None,
+                "study_date_end": order.study_date_end.isoformat() if order and order.study_date_end else None,
             }
         )
     return out
@@ -351,11 +365,18 @@ def delete_project(
     project_id: int,
     db: Session = Depends(get_db),
     tenant_id: int = Depends(tenant_from_jwt),
-    _admin: User = Depends(require_admin),
+    user: User = Depends(get_current_user),
 ):
     project = db.query(Project).filter(Project.id == project_id, Project.tenant_id == tenant_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    assert_user_can_delete_project(db, user, project)
+    db.query(ProjectShare).filter(ProjectShare.project_id == project_id).delete()
+    db.query(ProjectProcessingLog).filter(ProjectProcessingLog.project_id == project_id).delete()
+    db.query(StudyOrder).filter(StudyOrder.project_id == project_id).update(
+        {StudyOrder.project_id: None},
+        synchronize_session=False,
+    )
     db.query(AIResult).filter(AIResult.project_id == project_id, AIResult.tenant_id == tenant_id).delete()
     db.query(RasterLayer).filter(RasterLayer.project_id == project_id, RasterLayer.tenant_id == tenant_id).delete()
     db.query(Layer).filter(Layer.project_id == project_id, Layer.tenant_id == tenant_id).delete()

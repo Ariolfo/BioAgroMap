@@ -124,6 +124,8 @@ class ProjectSummary(BaseModel):
     status: str = "pendiente"
     created_at: str | None = None
     published_at: str | None = None
+    study_date_start: str | None = None
+    study_date_end: str | None = None
 
 
 class ProjectShareCreate(BaseModel):
@@ -176,6 +178,13 @@ class DownloadRequest(BaseModel):
     start_date: str | None = None
     end_date: str | None = None
     layer_id: int | None = None
+    download_subpath: str | None = Field(
+        default=None,
+        description=(
+            "Destino en Data_Bioagro: ``ext:`` o ``ext:carpeta/…``. "
+            "Obligatorio para Sentinel-2. Se crea ``Sentinel2/`` dentro si no existe."
+        ),
+    )
 
 
 class CropRequest(BaseModel):
@@ -202,20 +211,36 @@ class ClusterRequest(BaseModel):
 
 
 class S1GrdRecorteRequest(BaseModel):
-    """Recorte (subset espacial) de productos Sentinel-1 GRD IW bajo ``downloads/<slug>/Sentinel1/``."""
+    """Recorte (subset espacial) de productos Sentinel-1 GRD IW."""
 
     project_id: int
     layer_id: int | None = None
     product_paths: list[str] = Field(
         min_length=1,
-        description="Rutas relativas a ``Sentinel1/`` (posix), p. ej. ``escena.SAFE`` o ``2026/01/escena.SAFE`` o ``x.zip``.",
+        description=(
+            "Rutas relativas a la carpeta origen (posix), p. ej. ``escena.SAFE`` o ``2026/01/escena.SAFE`` o ``x.zip``."
+        ),
+    )
+    source_subpath: str | None = Field(
+        default=None,
+        description=(
+            "Origen de productos S1: ruta relativa bajo el proyecto, o ``ext:`` / ``ext:carpeta/…`` "
+            "bajo EXTERNAL_DATA_ROOT (Data_Bioagro). Si se omite, ``downloads/<slug>/Sentinel1/``."
+        ),
     )
 
 
 class PsPlanetZipExtractRequest(BaseModel):
-    """Extrae ``composite.tif`` y metadatos desde zips PlanetScope en ``rasterPS/`` hacia ``recortesPS/``."""
+    """Extrae ``composite.tif`` y metadatos desde zips PlanetScope hacia ``recortesPS/``."""
 
     project_id: int
+    source_subpath: str | None = Field(
+        default=None,
+        description=(
+            "Origen de ZIP Planet: ruta bajo el proyecto, o ``ext:…`` en Data_Bioagro. "
+            "Si se omite, ``rasterPS/``."
+        ),
+    )
 
 
 class S2L2aRecorteRequest(BaseModel):
@@ -231,15 +256,14 @@ class S2L2aRecorteRequest(BaseModel):
     source_subpath: str | None = Field(
         default=None,
         description=(
-            "Ruta relativa (posix) bajo tenant_*/project_*/ donde buscar L2A. "
-            "Si se omite, se usa la carpeta de descargas Sentinel por defecto (downloads/<slug>). "
-            "Cadena vacía = raíz del proyecto."
+            "Origen L2A: ruta bajo el proyecto, o ``ext:…`` en Data_Bioagro. "
+            "Si se omite, ``downloads/<slug>/Sentinel2/``."
         ),
     )
 
 
 class S1SarIndexStacksRequest(BaseModel):
-    """Stacks multibanda de índices SAR (VV/VH sigma0 dB) desde ``s1prepoceso/``."""
+    """Stacks multibanda de índices SAR (VV/VH sigma0 dB) desde ``s1preproceso/``."""
 
     project_id: int
     indices: list[str] = Field(..., min_length=1, description="RVI, RFDI, VV_VH, VH_VV, NRPB y/o TODOS")
@@ -247,7 +271,7 @@ class S1SarIndexStacksRequest(BaseModel):
         ...,
         min_length=1,
         description=(
-            "Rutas relativas a ``Sigma0_VV_db.img`` bajo ``s1prepoceso/`` (una por escena). "
+            "Rutas relativas a ``Sigma0_VV_db.img`` bajo ``s1preproceso/`` (una por escena). "
             "El VH de la misma escena se toma de ``Sigma0_VH_db.img`` en esa carpeta."
         ),
     )
@@ -302,21 +326,24 @@ class RoiSelectionNormalized(BaseModel):
 
 
 class VegetationTimeSeriesRequest(BaseModel):
-    """Series temporales por índice desde recortes L2A (6 bandas) o PlanetScope (8 bandas).
+    """Series temporales desde stacks ya estimados en ``indices/`` (S2) o ``indecesPS/`` (PS).
 
-    Por defecto devuelve **una serie por píxel** (muestreadas hasta ``max_pixel_series``) además de
-    agregados por escena en ``points``.
+    No requiere seleccionar escenas: usa cada stack multibanda (una banda por fecha).
+    Opcionalmente ``dates`` filtra bandas; si se omite, se usa la intersección de fechas
+    entre todos los stacks presentes.
     """
 
     project_id: int
-    raster_layer_ids: list[int] = Field(default_factory=list)
-    recorte_relative_paths: list[str] = Field(
-        default_factory=list,
-        description="Rutas relativas dentro de recortes/ o recortesPS/ (mismo ``relative_path`` que el inventario).",
-    )
     pipeline_variant: str = Field(
         default="s2",
-        description="s2 → L2A 6 bandas; ps → PlanetScope 8 bandas (índices del catálogo PS).",
+        description="s2 → stacks en indices/; ps → stacks en indecesPS/.",
+    )
+    dates: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Fechas ISO opcionales (YYYY-MM-DD). Vacío = todas las fechas comunes "
+            "entre los stacks de índices estimados."
+        ),
     )
     max_pixel_series: int = Field(
         default=4000,
@@ -330,24 +357,21 @@ class VegetationTimeSeriesRequest(BaseModel):
         description="ROI opcional: rectángulo (x1,y1,x2,y2) o polígono (polygon_points) en [0,1].",
     )
 
-    @model_validator(mode="after")
-    def at_least_one_scene_source(self):
-        if not self.raster_layer_ids and not self.recorte_relative_paths:
-            raise ValueError("Indica raster_layer_ids y/o recorte_relative_paths.")
-        return self
-
 
 class S1SarTimeSeriesRequest(BaseModel):
     """Series temporales desde stacks multibanda en ``s1indices/`` (RVI, RFDI, VV_VH, VH_VV, NRPB).
 
-    Solo se usan fechas presentes en **los cinco** stacks (intersección de ``BAND_DATES_JSON``).
+    Por defecto usa todas las fechas presentes en **los cinco** stacks (intersección de
+    ``BAND_DATES_JSON``). ``dates`` opcional filtra ese conjunto.
     """
 
     project_id: int
     dates: list[str] = Field(
-        ...,
-        min_length=1,
-        description="Fechas ISO (YYYY-MM-DD) a incluir; deben existir en todos los índices SAR del proyecto.",
+        default_factory=list,
+        description=(
+            "Fechas ISO opcionales (YYYY-MM-DD). Vacío = intersección completa de fechas "
+            "en s1indices/. Si se indican, deben existir en todos los índices SAR."
+        ),
     )
     max_pixel_series: int = Field(
         default=4000,
@@ -568,6 +592,29 @@ class ProcessingLogEntry(BaseModel):
     status: str
     details: dict = Field(default_factory=dict)
     created_at: str
+
+
+class LandingTextItem(BaseModel):
+    section_key: str
+    draft_body: str = ""
+    published_body: str = ""
+    updated_at: str | None = None
+    published_at: str | None = None
+
+
+class LandingTextsResponse(BaseModel):
+    project_id: int
+    texts: list[LandingTextItem] = Field(default_factory=list)
+    has_unpublished_drafts: bool = False
+
+
+class LandingTextUpsertItem(BaseModel):
+    section_key: str = Field(..., min_length=1, max_length=120)
+    draft_body: str = ""
+
+
+class LandingTextsUpsertRequest(BaseModel):
+    texts: list[LandingTextUpsertItem] = Field(default_factory=list)
 
 
 class PurgeS2L2aRecortesBody(BaseModel):

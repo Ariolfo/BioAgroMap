@@ -58,6 +58,13 @@ function axisTicks(scale, n = 4) {
   return out;
 }
 
+export const CLIMATE_SERIES_COLORS = {
+  precip: "#1976d2",
+  temp: "#e65100",
+  humidity: "#2e7d32",
+  radiation: "#6a1b9a",
+};
+
 export default function ClimateTimeSeriesChart({ data, activeVars, activeSceneDate, chartHeight = 180 }) {
   if (!data?.length) return <p className="adv-climate-empty">Sin datos agroclimáticos.</p>;
   const enabled = ["precip", "temp", "humidity", "radiation"].filter((k) => activeVars?.[k]);
@@ -93,7 +100,6 @@ export default function ClimateTimeSeriesChart({ data, activeVars, activeSceneDa
   const activeX = activeIdx >= 0 ? xs[activeIdx] : null;
   const step = Math.max(1, Math.ceil(data.length / 8));
 
-  const colors = { precip: "#1976d2", temp: "#e65100", humidity: "#2e7d32", radiation: "#6a1b9a" };
   const varAxis = {
     precip: leftScale ? "left" : "right",
     radiation: leftScale ? "left" : "right",
@@ -146,7 +152,7 @@ export default function ClimateTimeSeriesChart({ data, activeVars, activeSceneDa
         const scale = varAxis[k] === "left" ? leftScale || fallbackScale : rightScale || fallbackScale;
         const d = pathForVar(data, k, xs, scale, padT, innerH);
         if (!d) return null;
-        return <path key={k} d={d} fill="none" stroke={colors[k]} strokeWidth="2.1" />;
+        return <path key={k} d={d} fill="none" stroke={CLIMATE_SERIES_COLORS[k]} strokeWidth="2.1" />;
       })}
 
       {data.map((d, i) => {

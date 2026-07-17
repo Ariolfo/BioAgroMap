@@ -19,9 +19,34 @@ from app.core.order_email import send_study_order_notification
 from app.db.session import get_db
 from app.models.models import Layer, Project, ProjectProcessingLog, StudyOrder, User
 from app.schemas.schemas import StudyOrderCreate, StudyOrderDetail, StudyOrderStatusPatch, StudyOrderSummary
+from app.services.aoi_vector import geojson_from_vector_path
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _safe_zip_member(name: str) -> bool:
+    normalized = name.replace("\\", "/")
+    if ".." in normalized:
+        return False
+    return not normalized.startswith(("/", "\\"))
+
+
+def _geojson_from_zip_contents(path: Path) -> dict | None:
+    with zipfile.ZipFile(path) as zf:
+        for name in zf.namelist():
+            if not _safe_zip_member(name):
+                continue
+            lower = name.replace("\\", "/").lower()
+            if lower.startswith("__macosx/") or "/__macosx/" in lower:
+                continue
+            if lower.endswith((".geojson", ".json")):
+                return json.loads(zf.read(name).decode("utf-8"))
+            if lower.endswith(".kml"):
+                r = _kml_to_geojson(zf.read(name).decode("utf-8"))
+                if r:
+                    return r
+    return None
 
 
 def _normalize_geometry(raw: dict) -> dict:
@@ -78,18 +103,19 @@ def _parse_uploaded_vector(path: Path) -> dict:
                         return r
         raise HTTPException(status_code=422, detail="KMZ sin KML válido")
     if ext in {".zip", ".shp"}:
+        if ext == ".zip":
+            nested = _geojson_from_zip_contents(path)
+            if nested is not None:
+                return nested
         try:
-            gdf = gpd.read_file(path)
+            return geojson_from_vector_path(path)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
         except Exception as e:
             raise HTTPException(
                 status_code=422,
-                detail="No se pudo leer el shapefile. Use .zip con .shp, .dbf y .shx o un KML/KMZ.",
+                detail="No se pudo leer el shapefile. Comprima .shp, .dbf y .shx juntos en un .zip, o use KML/KMZ/GeoJSON.",
             ) from e
-        if gdf.empty:
-            raise HTTPException(status_code=422, detail="Capa vectorial vacía")
-        if gdf.crs is not None:
-            gdf = gdf.to_crs(4326)
-        return json.loads(gdf.to_json())
     raise HTTPException(status_code=400, detail="Formato no soportado (.kml, .kmz, .shp, .zip, .geojson)")
 
 

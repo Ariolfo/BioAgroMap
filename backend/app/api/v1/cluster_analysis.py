@@ -1,4 +1,4 @@
-"""API: método del codo + GMM sobre stacks de índices (S2/PS/S1) y recortes multibanda (S2/PS)."""
+"""API: método del codo + GMM sobre stacks de índices (S2/PS/S1)."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_project_dashboard_access, tenant_from_jwt
-from app.api.v1.helpers import _tenant_storage
+from app.api.v1.helpers import _tenant_storage, project_s1_preproceso_dir
 from app.db.session import get_db
 from app.models.models import Project, User
 from app.schemas.schemas import ClusterElbowRequest, ClusterGmmRequest
@@ -23,7 +23,6 @@ from app.services.preprocess_pipeline_variant import (
     cluster_output_dir_name,
     indices_dir_name,
     normalize_pipeline_variant,
-    recortes_dir_name,
 )
 from app.services.s1_sar_indices import (
     discover_s1_prep_sar_scenes,
@@ -47,15 +46,29 @@ def _cluster_out_dir_name(variant: str) -> str:
     return "cluster_s1_gmm" if variant == "s1" else cluster_output_dir_name(variant)
 
 
-def _discover_ps_index_datasets_only(tenant_id: int, project_id: int) -> list[dict]:
+def _discover_optical_index_datasets_only(
+    tenant_id: int,
+    project_id: int,
+    pipeline_variant: str,
+) -> list[dict]:
     """
-    PS: cluster únicamente sobre stacks de índices en ``indecesPS/``.
-    No incluir recortes multibanda en este flujo.
+    S2/PS: cluster únicamente sobre stacks de índices (``indices/`` o ``indecesPS/``).
+    No incluir recortes multibanda (imágenes L2A / Planet).
     """
-    recortes = _tenant_storage(tenant_id, project_id, recortes_dir_name("ps"))
-    indices = _tenant_storage(tenant_id, project_id, indices_dir_name("ps"))
-    all_ds = sc.discover_cluster_datasets(recortes, indices)
-    return [d for d in all_ds if str(d.get("kind", "")).lower() == "index"]
+    indices = _tenant_storage(tenant_id, project_id, indices_dir_name(pipeline_variant))
+    return sc.discover_index_cluster_datasets(indices)
+
+
+def _optical_index_empty_detail(pipeline_variant: str) -> str:
+    if pipeline_variant == "ps":
+        return (
+            "No hay stacks de índices en indecesPS/. "
+            "Primero ejecuta el paso 3 (Estimar índices PS)."
+        )
+    return (
+        "No hay stacks de índices en indices/ (NDVI, EVI, …). "
+        "Primero ejecuta el paso 3 (Estimar índices Sentinel-2)."
+    )
 
 
 def _norm_iso_date(s: str) -> str:
@@ -89,10 +102,10 @@ def _build_s1_virtual_sigma_stacks(
     selected_dates: list[str] | None,
 ) -> list[dict]:
     """
-    Construye stacks virtuales multibanda VV y VH (una banda por fecha) desde ``s1prepoceso/``.
+    Construye stacks virtuales multibanda VV y VH (una banda por fecha) desde ``s1preproceso/``.
     Se guardan en ``cluster_s1_virtual/`` para alimentar codo + GMM igual que los índices SAR.
     """
-    prep_root = _tenant_storage(tenant_id, project_id, "s1prepoceso")
+    prep_root = project_s1_preproceso_dir(tenant_id, project_id)
     virtual_root = _tenant_storage(tenant_id, project_id, "cluster_s1_virtual")
     scenes = discover_s1_prep_sar_scenes(tenant_id, project_id)
     if not scenes:
@@ -156,8 +169,57 @@ def _build_s1_virtual_sigma_stacks(
         {"key": "VH", "kind": "index", "path": str(vh_out.resolve()), "label": "Sigma0 VH"},
     ]
 
+def _assemble_s1_cluster_datasets(
+    tenant_id: int,
+    project_id: int,
+    selected_dates: list[str] | None,
+) -> list[dict]:
+    """
+    Datasets GMM/codo para Sentinel-1 (serie temporal, no por escena suelta):
+
+    1. Un stack por índice SAR en ``s1indices/`` (RVI, RFDI, VV_VH, VH_VV, NRPB).
+    2. Un stack temporal con todas las VV seleccionadas (``s1preproceso/`` → ``cluster_s1_virtual/VV``).
+    3. Un stack temporal con todas las VH seleccionadas (idem ``…/VH``).
+
+    Salida esperada: hasta 7 GeoTIFF en ``cluster_s1_gmm/`` (p. ej. ``RVI_gmm_k4.tif``, ``VV_gmm_k4.tif``).
+    """
+    s1indices = _tenant_storage(tenant_id, project_id, "s1indices")
+    datasets = sc.discover_s1_cluster_datasets(s1indices)
+    if not datasets:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No hay stacks en s1indices/ (RVI, RFDI, VV_VH, VH_VV, NRPB). "
+                "Ejecuta antes el paso 3) Estimar índices SAR."
+            ),
+        )
+
+    dates = [str(d).strip()[:10] for d in (selected_dates or []) if str(d).strip()]
+    dates = list(dict.fromkeys(dates))
+    if len(dates) < 2:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Selecciona al menos 2 fechas: el cluster S1 usa la serie temporal "
+                "(cada fecha = una banda/feature), no un mapa por imagen."
+            ),
+        )
+
+    sigma_ds = _build_s1_virtual_sigma_stacks(tenant_id, project_id, dates)
+    if len(sigma_ds) < 2:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No se pudieron armar los stacks temporales VV y VH desde s1preproceso/ "
+                "(faltan pares Sigma0_VV_db.img + Sigma0_VH_db.img para las fechas elegidas)."
+            ),
+        )
+    datasets.extend(sigma_ds)
+    return datasets
+
+
 # Cambiar al añadir comportamiento visible (comprobar con GET /cluster-analysis/capabilities).
-CLUSTER_PIPELINE_BUILD = "2026-04-22a.s1-cluster-dates"
+CLUSTER_PIPELINE_BUILD = "2026-07-14b.s2-indices-stacks-only"
 
 
 @router.get("/cluster-analysis/capabilities")
@@ -178,7 +240,11 @@ def cluster_capabilities():
         "satellite_clustering_py": p,
         "satellite_clustering_mtime": mtime,
         "clears_cluster_gmm_before_run": hasattr(scm, "clear_cluster_gmm_dir"),
-        "multiband_output_pattern": "DD-MM-YYYY_GMM_K{n}.tif",
+        "s2_cluster_mode": "temporal_stacks_on_indices_only",
+        "ps_cluster_mode": "temporal_stacks_on_indecesPS_only",
+        "s1_cluster_mode": "temporal_stacks_on_s1indices_plus_VV_and_VH",
+        "s1_expected_outputs": ["RVI", "RFDI", "VV_VH", "VH_VV", "NRPB", "VV", "VH"],
+        "optical_index_output_pattern": "{KEY}_gmm_k{n}.tif (S2/PS)",
     }
 
 
@@ -196,15 +262,12 @@ def list_cluster_datasets(
 ):
     _project_or_404(db, user, project_id, tenant_id)
     if pipeline_variant == "s1":
+        # Listado informativo: índices + VV/VH con todas las fechas disponibles (sin filtrar).
         s1indices = _tenant_storage(tenant_id, project_id, "s1indices")
         datasets = sc.discover_s1_cluster_datasets(s1indices)
         datasets.extend(_build_s1_virtual_sigma_stacks(tenant_id, project_id, selected_dates=None))
-    elif pipeline_variant == "ps":
-        datasets = _discover_ps_index_datasets_only(tenant_id, project_id)
     else:
-        recortes = _tenant_storage(tenant_id, project_id, recortes_dir_name(pipeline_variant))
-        indices = _tenant_storage(tenant_id, project_id, indices_dir_name(pipeline_variant))
-        datasets = sc.discover_cluster_datasets(recortes, indices)
+        datasets = _discover_optical_index_datasets_only(tenant_id, project_id, pipeline_variant)
     logger.info("cluster datasets project=%s count=%s", project_id, len(datasets))
     return {"datasets": datasets}
 
@@ -244,24 +307,13 @@ def cluster_elbow(
     _project_or_404(db, user, payload.project_id, tenant_id)
     pv = _cluster_pipeline_variant(payload.pipeline_variant)
     if pv == "s1":
-        s1indices = _tenant_storage(tenant_id, payload.project_id, "s1indices")
-        datasets = sc.discover_s1_cluster_datasets(s1indices)
-        datasets.extend(_build_s1_virtual_sigma_stacks(tenant_id, payload.project_id, payload.selected_dates))
-    elif pv == "ps":
-        datasets = _discover_ps_index_datasets_only(tenant_id, payload.project_id)
+        datasets = _assemble_s1_cluster_datasets(tenant_id, payload.project_id, payload.selected_dates)
     else:
-        recortes = _tenant_storage(tenant_id, payload.project_id, recortes_dir_name(pv))
-        indices = _tenant_storage(tenant_id, payload.project_id, indices_dir_name(pv))
-        datasets = sc.discover_cluster_datasets(recortes, indices)
+        datasets = _discover_optical_index_datasets_only(tenant_id, payload.project_id, pv)
     if not datasets:
-        detail = (
-            "No hay stacks de índices en indecesPS/. Primero ejecuta el paso 3 (Estimar índices PS)."
-            if pv == "ps"
-            else "No hay datasets para cluster en el variant seleccionado."
-        )
         raise HTTPException(
             status_code=400,
-            detail=detail,
+            detail=_optical_index_empty_detail(pv) if pv != "s1" else "No hay datasets para cluster.",
         )
 
     results: list[dict] = []
@@ -269,7 +321,15 @@ def cluster_elbow(
     if k_min < 1 or k_max < k_min or k_max > 50:
         raise HTTPException(status_code=400, detail="k_min/k_max inválidos (1 ≤ k_min ≤ k_max ≤ 50).")
 
-    logger.info("cluster elbow project=%s datasets=%s K=%s..%s", payload.project_id, len(datasets), k_min, k_max)
+    logger.info(
+        "cluster elbow project=%s variant=%s datasets=%s keys=%s K=%s..%s",
+        payload.project_id,
+        pv,
+        len(datasets),
+        [d.get("key") for d in datasets],
+        k_min,
+        k_max,
+    )
     for ds in datasets:
         path = Path(ds["path"])
         try:
@@ -295,7 +355,7 @@ def cluster_elbow(
             }
         )
 
-    return {"project_id": payload.project_id, "datasets": results}
+    return {"project_id": payload.project_id, "pipeline_variant": pv, "datasets": results}
 
 
 @router.post("/cluster-analysis/gmm")
@@ -308,22 +368,14 @@ def cluster_gmm(
     _project_or_404(db, user, payload.project_id, tenant_id)
     pv = _cluster_pipeline_variant(payload.pipeline_variant)
     if pv == "s1":
-        s1indices = _tenant_storage(tenant_id, payload.project_id, "s1indices")
-        datasets = sc.discover_s1_cluster_datasets(s1indices)
-        datasets.extend(_build_s1_virtual_sigma_stacks(tenant_id, payload.project_id, payload.selected_dates))
-    elif pv == "ps":
-        datasets = _discover_ps_index_datasets_only(tenant_id, payload.project_id)
+        datasets = _assemble_s1_cluster_datasets(tenant_id, payload.project_id, payload.selected_dates)
     else:
-        recortes = _tenant_storage(tenant_id, payload.project_id, recortes_dir_name(pv))
-        indices = _tenant_storage(tenant_id, payload.project_id, indices_dir_name(pv))
-        datasets = sc.discover_cluster_datasets(recortes, indices)
+        datasets = _discover_optical_index_datasets_only(tenant_id, payload.project_id, pv)
     if not datasets:
-        detail = (
-            "No hay stacks de índices en indecesPS/. Primero ejecuta el paso 3 (Estimar índices PS)."
-            if pv == "ps"
-            else "No hay datasets para clustering."
+        raise HTTPException(
+            status_code=400,
+            detail=_optical_index_empty_detail(pv) if pv != "s1" else "No hay datasets para clustering.",
         )
-        raise HTTPException(status_code=400, detail=detail)
 
     keys_found = {d["key"] for d in datasets}
     missing = keys_found - set(payload.k_by_key.keys())
@@ -337,9 +389,11 @@ def cluster_gmm(
     removed_n, out_abs = sc.clear_cluster_gmm_dir(out_dir)
     out_results: list[dict] = []
     logger.info(
-        "cluster GMM project=%s out=%s eliminados=%s (carpeta vaciada antes de escribir)",
+        "cluster GMM project=%s variant=%s out=%s keys=%s eliminados=%s",
         payload.project_id,
+        pv,
         out_abs,
+        [d.get("key") for d in datasets],
         removed_n,
     )
 
@@ -381,6 +435,7 @@ def cluster_gmm(
 
     return {
         "project_id": payload.project_id,
+        "pipeline_variant": pv,
         "output_dir": str(Path(out_dir).resolve()),
         "cluster_gmm_cleared_count": removed_n,
         "cluster_gmm_absolute_path": out_abs,

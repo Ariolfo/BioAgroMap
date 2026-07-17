@@ -327,43 +327,45 @@ export default function ClientSoilViewModal({
                     </button>
                     <span>{Math.round(soilClusterZoom * 100)}%</span>
                   </div>
-                  <div
-                    className={`adv-soilplus-image-frame adv-soilplus-image-frame--cluster adv-soilplus-cluster-scroll${soilClusterDragging ? " is-dragging" : ""}${soilClusterZoom > 1.01 ? " allow-pan-overflow" : ""}`}
-                    onWheel={handleSoilClusterWheel}
-                    onMouseDown={handleSoilClusterMouseDown}
-                    onMouseMove={handleSoilClusterMouseMove}
-                    onMouseUp={handleSoilClusterMouseUp}
-                    onMouseLeave={handleSoilClusterMouseUp}
-                  >
-                    {imgs.fcm ? (
-                      <div
-                        className="adv-soilplus-cluster-zoom-inner"
-                        style={{
-                          transform: `translate(${soilClusterPan.x}px, ${soilClusterPan.y}px) scale(${soilClusterZoom})`,
-                          transformOrigin: "center center",
-                        }}
-                      >
-                        <div className="adv-soilplus-cluster-img-lock">
-                          <img
-                            src={imgs.fcm}
-                            alt="Zonificación FCM sobre CV"
-                            className={`adv-soilplus-image adv-soilplus-image--zoomable${soilClusterDragging ? " is-dragging" : ""}`}
-                            draggable={false}
-                            onLoad={(e) => {
-                              const im = e.currentTarget;
-                              setSoilClusterNaturalSize({ w: im.naturalWidth, h: im.naturalHeight });
-                            }}
-                          />
-                          <SoilFcmSampleTriangles
-                            points={soilSamplingPlan?.sample_points}
-                            viewWidth={soilClusterViewW}
-                            viewHeight={soilClusterViewH}
-                          />
+                  <div className="adv-soilplus-image-frame adv-soilplus-image-frame--cluster">
+                    <div
+                      className={`adv-soilplus-cluster-scroll${soilClusterDragging ? " is-dragging" : ""}${soilClusterZoom > 1.01 ? " allow-pan-overflow" : ""}`}
+                      onWheel={handleSoilClusterWheel}
+                      onMouseDown={handleSoilClusterMouseDown}
+                      onMouseMove={handleSoilClusterMouseMove}
+                      onMouseUp={handleSoilClusterMouseUp}
+                      onMouseLeave={handleSoilClusterMouseUp}
+                    >
+                      {imgs.fcm ? (
+                        <div
+                          className="adv-soilplus-cluster-zoom-inner"
+                          style={{
+                            transform: `translate(${soilClusterPan.x}px, ${soilClusterPan.y}px) scale(${soilClusterZoom})`,
+                            transformOrigin: "center center",
+                          }}
+                        >
+                          <div className="adv-soilplus-cluster-img-lock">
+                            <img
+                              src={imgs.fcm}
+                              alt="Zonificación FCM sobre CV"
+                              className={`adv-soilplus-image adv-soilplus-image--zoomable${soilClusterDragging ? " is-dragging" : ""}`}
+                              draggable={false}
+                              onLoad={(e) => {
+                                const im = e.currentTarget;
+                                setSoilClusterNaturalSize({ w: im.naturalWidth, h: im.naturalHeight });
+                              }}
+                            />
+                            <SoilFcmSampleTriangles
+                              points={soilSamplingPlan?.sample_points}
+                              viewWidth={soilClusterViewW}
+                              viewHeight={soilClusterViewH}
+                            />
+                          </div>
                         </div>
-                      </div>
-                    ) : (
-                      <p className="adv-soilplus-image-empty">Sin imagen FCM.</p>
-                    )}
+                      ) : (
+                        <p className="adv-soilplus-image-empty">Sin imagen FCM.</p>
+                      )}
+                    </div>
                   </div>
                 </section>
               </div>

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import api, { formatApiErrorDetail } from "../../api";
 import { appendPlanetIntegralAppendix, buildDashboardIaTechnicalReport } from "./dashboardIaAnalysis";
 import { ensureMortalidadFigures, getCustomIaReportUrl } from "./customIaReports";
@@ -229,7 +229,9 @@ function ReportTable({ header, rows, keyPrefix }) {
   );
 }
 
-export default function DashboardIaAnalysisModal({ open, onClose, iaContext }) {
+export default function DashboardIaAnalysisModal({ open, onClose, iaContext, embedded = false }) {
+  const printAreaRef = useRef(null);
+  const [printing, setPrinting] = useState(false);
   const [planetIntegral, setPlanetIntegral] = useState(null);
   const [integralLoading, setIntegralLoading] = useState(false);
   const [integralError, setIntegralError] = useState("");
@@ -323,22 +325,71 @@ export default function DashboardIaAnalysisModal({ open, onClose, iaContext }) {
     return parsed;
   }, [fullReport, isCustom]);
 
-  if (!open) return null;
+  const reportLoading = customLoading || (!isCustom && integralLoading);
+  const reportReady = blocks.length > 0 && !reportLoading && !customError;
 
-  return (
-    <div className="adv-ia-overlay" role="dialog" aria-modal="true" aria-labelledby="adv-ia-report-title">
-      <div className="adv-ia-backdrop" onClick={onClose} />
-      <div className={`adv-ia-window adv-ia-window--report${isCustom ? " adv-ia-window--report-custom" : ""}`}>
+  const handlePrintPdf = useCallback(async () => {
+    const root = printAreaRef.current;
+    if (!root || !reportReady) return;
+    setPrinting(true);
+    try {
+      const imgs = root.querySelectorAll("img");
+      await Promise.all(
+        Array.from(imgs).map(
+          (img) =>
+            img.complete
+              ? Promise.resolve()
+              : new Promise((resolve) => {
+                  img.addEventListener("load", resolve, { once: true });
+                  img.addEventListener("error", resolve, { once: true });
+                }),
+        ),
+      );
+      document.body.classList.add("adv-ia-printing");
+      const cleanup = () => {
+        document.body.classList.remove("adv-ia-printing");
+        setPrinting(false);
+      };
+      window.addEventListener("afterprint", cleanup, { once: true });
+      window.print();
+      window.setTimeout(() => {
+        if (document.body.classList.contains("adv-ia-printing")) cleanup();
+      }, 2000);
+    } catch {
+      setPrinting(false);
+    }
+  }, [reportReady]);
+
+  if (!embedded && !open) return null;
+
+  const reportWindow = (
+      <div
+        ref={printAreaRef}
+        className={`adv-ia-window adv-ia-window--report adv-ia-print-area${isCustom ? " adv-ia-window--report-custom" : ""}${embedded ? " adv-ia-window--embedded" : ""}`}
+      >
         <div className="adv-ia-header adv-ia-header--report">
           <div className="adv-ia-header-title">
-            <DigitalBrainIcon className="adv-ia-header-icon" size={24} />
+            <DigitalBrainIcon className="adv-ia-header-icon adv-no-print" size={24} />
             <h3 id="adv-ia-report-title">
               {isCustom ? "Informe agronómico — Palma Vichada" : "Informe técnico (ingeniería agronómica)"}
             </h3>
           </div>
-          <button type="button" className="adv-close-btn" onClick={onClose} aria-label="Cerrar ventana">
-            ×
-          </button>
+          <div className="adv-ia-header-actions adv-no-print">
+            <button
+              type="button"
+              className="adv-ia-pdf-btn"
+              onClick={handlePrintPdf}
+              disabled={!reportReady || printing}
+              title="Abre el diálogo de impresión; elija «Guardar como PDF» para descargar el informe tal como se ve aquí"
+            >
+              {printing ? "Preparando…" : "Guardar PDF"}
+            </button>
+            {!embedded ? (
+              <button type="button" className="adv-close-btn" onClick={onClose} aria-label="Cerrar ventana">
+                ×
+              </button>
+            ) : null}
+          </div>
         </div>
         <p className="adv-ia-sub adv-ia-sub--report">
           {iaContext?.projectName ? `Proyecto: ${String(iaContext.projectName).trim()}` : null}
@@ -351,16 +402,18 @@ export default function DashboardIaAnalysisModal({ open, onClose, iaContext }) {
             </header>
           ) : null}
           {customLoading ? (
-            <p className="adv-ia-integral-status">Cargando informe Palma Vichada…</p>
+            <p className="adv-ia-integral-status adv-no-print">Cargando informe Palma Vichada…</p>
           ) : null}
           {customError ? (
-            <p className="adv-ia-integral-status adv-ia-integral-status--err">{customError}</p>
+            <p className="adv-ia-integral-status adv-ia-integral-status--err adv-no-print">{customError}</p>
           ) : null}
           {!isCustom && integralLoading ? (
-            <p className="adv-ia-integral-status">Analizando todas las escenas Planet en servidor (NDVI, RGB, textura)…</p>
+            <p className="adv-ia-integral-status adv-no-print">
+              Analizando todas las escenas Planet en servidor (NDVI, RGB, textura)…
+            </p>
           ) : null}
           {!isCustom && integralError ? (
-            <p className="adv-ia-integral-status adv-ia-integral-status--err">
+            <p className="adv-ia-integral-status adv-ia-integral-status--err adv-no-print">
               No se pudo completar el análisis multi-escena: {integralError}
             </p>
           ) : null}
@@ -425,6 +478,20 @@ export default function DashboardIaAnalysisModal({ open, onClose, iaContext }) {
           })}
         </div>
       </div>
+  );
+
+  if (embedded) {
+    return (
+      <div className="adv-ia-embedded" role="region" aria-labelledby="adv-ia-report-title">
+        {reportWindow}
+      </div>
+    );
+  }
+
+  return (
+    <div className="adv-ia-overlay" role="dialog" aria-modal="true" aria-labelledby="adv-ia-report-title">
+      <div className="adv-ia-backdrop" onClick={onClose} />
+      {reportWindow}
     </div>
   );
 }

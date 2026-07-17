@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import api, { formatApiErrorDetail, setAuthToken } from "../api";
 import RgbTimeSeriesGallery from "./RgbTimeSeriesGallery";
 import VegetationTimeSeriesCharts from "./VegetationTimeSeriesCharts";
+import ProjectStorageFolderPicker from "./ProjectStorageFolderPicker";
 
 /** Catálogo índices SAR (sigma0 VV/VH lineal); claves = carpetas bajo ``s1indices/``. */
 export const S1_SAR_INDEX_CATALOG = [
@@ -79,7 +80,9 @@ export default function Sentinel1Panel({
   const [s1InventoryLoading, setS1InventoryLoading] = useState(false);
   const [s1Error, setS1Error] = useState("");
   const [s1Selected, setS1Selected] = useState(() => new Set());
-  /** null | "indices" (estimar SAR) | "ts" (series de tiempo desde s1indices/) */
+  const [s1JobSourceSubpath, setS1JobSourceSubpath] = useState(undefined);
+  const [s1FolderPickerOpen, setS1FolderPickerOpen] = useState(false);
+  /** null | "indices" (estimar SAR). La selección de fechas de series ya no aplica; el cluster sigue usando s1ClusterPickerOpen. */
   const [s1GalleryKind, setS1GalleryKind] = useState(null);
   const [selectedS1SarIndices, setSelectedS1SarIndices] = useState([]);
   const [s1VtsModalOpen, setS1VtsModalOpen] = useState(false);
@@ -130,7 +133,13 @@ export default function Sentinel1Panel({
     }
   }, [clusterGmmResults]);
 
-  const s1GmmIndexResults = clusterGmmResults?.results?.filter((r) => r.kind === "index") ?? [];
+  const s1GmmIndexResults =
+    clusterGmmResults?.results?.filter(
+      (r) => r.kind === "index" && !["VV", "VH"].includes(String(r.key || "").toUpperCase())
+    ) ?? [];
+  const s1GmmPolarResults =
+    clusterGmmResults?.results?.filter((r) => ["VV", "VH"].includes(String(r.key || "").toUpperCase())) ??
+    [];
 
   async function openS1ClusterGmmResultsOrHint() {
     if (clusterGmmResults?.results?.length) {
@@ -207,17 +216,22 @@ export default function Sentinel1Panel({
     setS1Inventory(null);
     setS1Error("");
     setS1Selected(new Set());
-    void loadS1Inventory();
+    setS1JobSourceSubpath(undefined);
+    void loadS1Inventory(undefined);
   }
 
-  async function loadS1Inventory() {
+  async function loadS1Inventory(subpath) {
     if (!projectId || !token) return;
     setS1InventoryLoading(true);
     setS1Error("");
     try {
       setAuthToken(token);
-      const r = await api.get(`/raster/project-sentinel1-inventory/${projectId}`);
+      const params = {};
+      if (subpath !== undefined) params.subpath = subpath;
+      const r = await api.get(`/raster/project-sentinel1-inventory/${projectId}`, { params });
       setS1Inventory(r.data);
+      setS1JobSourceSubpath(subpath);
+      setS1Selected(new Set());
     } catch (e) {
       setS1Error(formatApiErrorDetail(e));
     } finally {
@@ -236,10 +250,28 @@ export default function Sentinel1Panel({
     });
   }
 
+  async function runS1SarTimeSeriesFromStacks() {
+    if (!token || !projectId) return;
+    setS1VtsLoading(true);
+    setS1VtsError("");
+    try {
+      setAuthToken(token);
+      const res = await api.post("/preprocess/s1-sar-time-series", {
+        project_id: Number(projectId),
+      });
+      setS1VtsData(res.data);
+      setS1VtsModalOpen(true);
+    } catch (e) {
+      setS1VtsError(formatApiErrorDetail(e));
+    } finally {
+      setS1VtsLoading(false);
+    }
+  }
+
   async function runRecorteFromModal() {
     const paths = [...s1Selected];
     const layerId = recorteLayerId ? Number(recorteLayerId) : undefined;
-    const ok = await onS1GrdRecortes?.(layerId, paths);
+    const ok = await onS1GrdRecortes?.(layerId, paths, s1JobSourceSubpath);
     if (ok) {
       setS1ModalOpen(false);
       setS1Selected(new Set());
@@ -327,7 +359,7 @@ export default function Sentinel1Panel({
           <span className="indices-section-hint">
             Por escena, en la misma carpeta <code>*.data</code>: <strong>VV</strong> ={" "}
             <code>Sigma0_VV_db.img</code>, <strong>VH</strong> = <code>Sigma0_VH_db.img</code> (sigma0 dB en{" "}
-            <code>s1prepoceso/</code>). Salida: un GeoTIFF por índice en <code>s1indices/&lt;ÍNDICE&gt;/</code>, una
+            <code>s1preproceso/</code>). Salida: un GeoTIFF por índice en <code>s1indices/&lt;ÍNDICE&gt;/</code>, una
             banda por fecha en orden cronológico.
           </span>
         </div>
@@ -366,21 +398,23 @@ export default function Sentinel1Panel({
         <div className="indices-section-title">
           <strong>5) Series de tiempo</strong>
           <span className="indices-section-hint">
-            Mismas fechas que aparecen en <strong>los cinco</strong> stacks bajo <code>s1indices/</code> (RVI, RFDI,
-            VV/VH, VH/VV, NRPB): medias espaciales y series por píxel (muestreadas), normalizadas 0–1 por fecha.
+            Sobre cada stack en <code>s1indices/</code> (RVI, RFDI, VV/VH, VH/VV, NRPB): todas las fechas
+            comunes, medias espaciales y series por píxel (muestreadas), normalizadas 0–1 por fecha.
           </span>
         </div>
         <button
           type="button"
           className="indices-run-btn"
-          onClick={() => {
-            setS1VtsError("");
-            setS1GalleryKind("ts");
-          }}
-          disabled={busy || !projectId || !token}
+          onClick={() => void runS1SarTimeSeriesFromStacks()}
+          disabled={busy || !projectId || !token || s1VtsLoading}
         >
-          Seleccionar fechas
+          {s1VtsLoading ? "Calculando series…" : "Calcular series de tiempo"}
         </button>
+        {s1VtsError ? (
+          <p className="prepro-hint" role="alert">
+            {s1VtsError}
+          </p>
+        ) : null}
       </div>
 
       {s1ModalOpen ? (
@@ -410,7 +444,35 @@ export default function Sentinel1Panel({
                 <>
                   <p className="l2a-downloads-hint">
                     Carpeta escaneada: <code>{s1Inventory.downloads_dir}</code>
+                    {s1JobSourceSubpath !== undefined ? (
+                      <>
+                        {" "}
+                        (origen: <code>{s1JobSourceSubpath || "(raíz)"}</code>)
+                      </>
+                    ) : (
+                      <> (por defecto Sentinel1)</>
+                    )}
                   </p>
+                  <div className="l2a-downloads-actions" style={{ marginBottom: 8 }}>
+                    <button
+                      type="button"
+                      className="rgb-gallery-btn-secondary"
+                      disabled={s1InventoryLoading}
+                      onClick={() => setS1FolderPickerOpen(true)}
+                    >
+                      Elegir otra carpeta
+                    </button>
+                    {s1JobSourceSubpath !== undefined ? (
+                      <button
+                        type="button"
+                        className="rgb-gallery-btn-secondary"
+                        disabled={s1InventoryLoading}
+                        onClick={() => void loadS1Inventory(undefined)}
+                      >
+                        Volver a Sentinel1 por defecto
+                      </button>
+                    ) : null}
+                  </div>
                   {!s1Inventory.exists ? (
                     <p className="l2a-downloads-empty">
                       La carpeta <code>Sentinel1</code> no existe aún o no es accesible. Descarga GRD IW desde la pestaña
@@ -494,7 +556,7 @@ export default function Sentinel1Panel({
                   type="button"
                   className="rgb-gallery-btn-secondary"
                   disabled={s1InventoryLoading}
-                  onClick={() => void loadS1Inventory()}
+                  onClick={() => void loadS1Inventory(s1JobSourceSubpath)}
                 >
                   Actualizar lista
                 </button>
@@ -544,9 +606,13 @@ export default function Sentinel1Panel({
             </div>
             <div className="index-modal-body cluster-flow-body">
               <p className="cluster-flow-intro">
-                Selecciona fechas/escenas para filtrar bandas en <code>s1indices/</code> y ejecutar
-                clustering por índice SAR (<strong>RVI, RFDI, VV/VH, VH/VV y NRPB</strong>). Primero
-                calcula el método del codo y luego ejecuta GMM con una sola K para todos los índices.
+                El cluster S1 <strong>no</strong> se calcula por escena suelta. Selecciona ≥2 fechas y el GMM corre
+                sobre series temporales:
+                <br />
+                <strong>5 índices</strong> en <code>s1indices/</code> (RVI, RFDI, VV/VH, VH/VV, NRPB) +{" "}
+                <strong>1 mapa VV</strong> y <strong>1 mapa VH</strong> (todas las fechas elegidas desde{" "}
+                <code>s1preproceso/</code>). Salida: 7 GeoTIFF en <code>cluster_s1_gmm/</code> (
+                <code>RVI_gmm_k*.tif</code> … <code>VV_gmm_k*.tif</code>, <code>VH_gmm_k*.tif</code>).
               </p>
               <div className="cluster-flow-toolbar">
                 <button
@@ -565,10 +631,10 @@ export default function Sentinel1Panel({
                   type="button"
                   className="indices-run-btn"
                   onClick={() => onClusterElbow?.(s1ClusterSelectedDates)}
-                  disabled={clusterElbowLoading || !s1ClusterSelectedDates.length}
+                  disabled={clusterElbowLoading || s1ClusterSelectedDates.length < 2}
                   title={
-                    !s1ClusterSelectedDates.length
-                      ? "Selecciona al menos una fecha para cluster SAR"
+                    s1ClusterSelectedDates.length < 2
+                      ? "Selecciona al menos 2 fechas (serie temporal: índices + VV + VH)"
                       : undefined
                   }
                 >
@@ -577,7 +643,7 @@ export default function Sentinel1Panel({
                 {clusterElbowResults?.datasets?.length ? (
                   <>
                     <label className="cluster-unified-k-label">
-                      K para todos los índices (1–30)
+                      K para los 7 datasets (índices + VV + VH) (1–30)
                       <input
                         type="number"
                         min={1}
@@ -612,6 +678,18 @@ export default function Sentinel1Panel({
               </div>
               <p className="cluster-meta">
                 Fechas seleccionadas: <strong>{s1ClusterSelectedDates.length}</strong>
+                {s1ClusterSelectedDates.length > 0 && s1ClusterSelectedDates.length < 2 ? (
+                  <> — faltan fechas para el cluster temporal</>
+                ) : null}
+                {clusterElbowResults?.datasets?.length ? (
+                  <>
+                    {" "}
+                    · Datasets codo:{" "}
+                    <strong>
+                      {clusterElbowResults.datasets.map((d) => d.key).join(", ")}
+                    </strong>
+                  </>
+                ) : null}
               </p>
 
               {clusterElbowResults?.datasets?.length ? (
@@ -707,24 +785,54 @@ export default function Sentinel1Panel({
               ) : null}
               <div className="cluster-results-zoom-inner" style={{ zoom: s1ClusterResultsZoom / 100 }}>
                 {s1GmmIndexResults.length ? (
-                  <div className="cluster-gmm-grid cluster-gmm-grid--row1">
-                    {s1GmmIndexResults.map((r) => (
-                      <div key={r.key} className="cluster-gmm-tile">
-                        <h5 className="cluster-gmm-tile-title">
-                          <code>{r.output_basename ?? r.key}</code>
-                          <span className="cluster-gmm-k"> · K={r.k_used ?? "—"}</span>
-                        </h5>
-                        <p className="cluster-meta">{r.label}</p>
-                        {r.preview_png_base64 ? (
-                          <img
-                            className="cluster-elbow-img"
-                            alt={`Clusters ${r.key}`}
-                            src={`data:image/png;base64,${r.preview_png_base64}`}
-                          />
-                        ) : null}
-                      </div>
-                    ))}
-                  </div>
+                  <>
+                    <p className="cluster-meta">
+                      <strong>Índices SAR</strong> (serie temporal en <code>s1indices/</code>)
+                    </p>
+                    <div className="cluster-gmm-grid cluster-gmm-grid--row1">
+                      {s1GmmIndexResults.map((r) => (
+                        <div key={r.key} className="cluster-gmm-tile">
+                          <h5 className="cluster-gmm-tile-title">
+                            <code>{r.output_basename ?? r.key}</code>
+                            <span className="cluster-gmm-k"> · K={r.k_used ?? "—"}</span>
+                          </h5>
+                          <p className="cluster-meta">{r.label}</p>
+                          {r.preview_png_base64 ? (
+                            <img
+                              className="cluster-elbow-img"
+                              alt={`Clusters ${r.key}`}
+                              src={`data:image/png;base64,${r.preview_png_base64}`}
+                            />
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                ) : null}
+                {s1GmmPolarResults.length ? (
+                  <>
+                    <p className="cluster-meta">
+                      <strong>Sigma0 VV / VH</strong> (todas las fechas seleccionadas)
+                    </p>
+                    <div className="cluster-gmm-grid cluster-gmm-grid--row1">
+                      {s1GmmPolarResults.map((r) => (
+                        <div key={r.key} className="cluster-gmm-tile">
+                          <h5 className="cluster-gmm-tile-title">
+                            <code>{r.output_basename ?? r.key}</code>
+                            <span className="cluster-gmm-k"> · K={r.k_used ?? "—"}</span>
+                          </h5>
+                          <p className="cluster-meta">{r.label}</p>
+                          {r.preview_png_base64 ? (
+                            <img
+                              className="cluster-elbow-img"
+                              alt={`Clusters ${r.key}`}
+                              src={`data:image/png;base64,${r.preview_png_base64}`}
+                            />
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                  </>
                 ) : null}
                 <p className="cluster-out-dir">
                   Salidas GeoTIFF: <code>{clusterGmmResults.output_dir}</code>
@@ -737,7 +845,7 @@ export default function Sentinel1Panel({
 
       <RgbTimeSeriesGallery
         open={s1GalleryKind !== null || s1ClusterPickerOpen}
-        mode={s1ClusterPickerOpen ? "s1SarTimeSeriesSelect" : s1GalleryKind === "ts" ? "s1SarTimeSeriesSelect" : "s1SarIndexSelect"}
+        mode={s1ClusterPickerOpen ? "s1SarTimeSeriesSelect" : "s1SarIndexSelect"}
         galleryVisualMode="rgb"
         projectName={projectName}
         indexCatalog={S1_SAR_INDEX_CATALOG}
@@ -766,33 +874,13 @@ export default function Sentinel1Panel({
           setS1GalleryKind(null);
         }}
         onTimeSeries={async (arg) => {
-          if (s1ClusterPickerOpen) {
-            if (arg && typeof arg === "object" && Array.isArray(arg.s1SarDates)) {
-              const picked = [...new Set(arg.s1SarDates.map((d) => String(d).slice(0, 10)).filter(Boolean))].sort();
-              setS1ClusterSelectedDates(picked);
-            }
-            setS1ClusterPickerOpen(false);
-            setS1ClusterModalOpen(true);
-            return;
+          if (!s1ClusterPickerOpen) return;
+          if (arg && typeof arg === "object" && Array.isArray(arg.s1SarDates)) {
+            const picked = [...new Set(arg.s1SarDates.map((d) => String(d).slice(0, 10)).filter(Boolean))].sort();
+            setS1ClusterSelectedDates(picked);
           }
-          if (!token || !projectId) return;
-          if (!arg || typeof arg !== "object" || !Array.isArray(arg.s1SarDates) || !arg.s1SarDates.length) return;
-          setS1VtsLoading(true);
-          setS1VtsError("");
-          try {
-            setAuthToken(token);
-            const res = await api.post("/preprocess/s1-sar-time-series", {
-              project_id: Number(projectId),
-              dates: arg.s1SarDates,
-            });
-            setS1VtsData(res.data);
-            setS1GalleryKind(null);
-            setS1VtsModalOpen(true);
-          } catch (e) {
-            setS1VtsError(formatApiErrorDetail(e));
-          } finally {
-            setS1VtsLoading(false);
-          }
+          setS1ClusterPickerOpen(false);
+          setS1ClusterModalOpen(true);
         }}
         projectId={projectId}
         token={token}
@@ -840,6 +928,20 @@ export default function Sentinel1Panel({
           {s1VtsError}
         </div>
       ) : null}
+
+      <ProjectStorageFolderPicker
+        open={s1FolderPickerOpen}
+        projectId={projectId}
+        token={token}
+        kind="s1"
+        title="Carpeta origen Sentinel-1"
+        initialPath={s1JobSourceSubpath || "downloads"}
+        onCancel={() => setS1FolderPickerOpen(false)}
+        onSelect={(rel) => {
+          setS1FolderPickerOpen(false);
+          void loadS1Inventory(rel);
+        }}
+      />
     </>
   );
 }

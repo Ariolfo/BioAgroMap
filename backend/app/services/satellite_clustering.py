@@ -1,5 +1,5 @@
 """
-Clustering espacial (KMeans/codo, GMM) sobre stacks de índices y recortes multibanda Sentinel-2.
+Clustering espacial (KMeans/codo, GMM) sobre stacks temporales de índices (S2/PS/S1).
 Diseñado para ejecutar un dataset a la vez y usar muestreo para imágenes grandes.
 """
 
@@ -144,7 +144,7 @@ def _date_dd_mm_yyyy_for_multiband_output(path: Path) -> str:
 
 
 def multiband_gmm_output_filename(path: Path, k_used: int) -> str:
-    """``DD-MM-YYYY_GMM_K{k}.tif`` para recortes de 6+ bandas (sin ``/`` en el nombre)."""
+    """``DD-MM-YYYY_GMM_K{k}.tif`` para salidas multibanda legacy (sin ``/`` en el nombre)."""
     d = _date_dd_mm_yyyy_for_multiband_output(path)
     return f"{d}_GMM_K{k_used}.tif"
 
@@ -164,22 +164,35 @@ def _unique_dest_path(out_dir: Path, filename: str) -> Path:
         n += 1
 
 
-def discover_cluster_datasets(recortes_root: Path, indices_root: Path) -> list[dict[str, Any]]:
+def discover_index_cluster_datasets(indices_root: Path) -> list[dict[str, Any]]:
     """
-    Índices: un GeoTIFF reciente por carpeta (NDVI, EVI, …).
-    Recortes: **todos** los ``.tif`` en ``recortes/`` con al menos 6 bandas (excluye COG auxiliares).
-    Orden: primero índices, luego recortes por nombre de archivo.
+    Un GeoTIFF reciente por carpeta de índice bajo ``indices/`` o ``indecesPS/``
+    (NDVI, EVI, NDWI, …). Usado por el flujo óptico S2/PS (sin recortes).
     """
     out: list[dict[str, Any]] = []
     for name in INDEX_KEYS:
         d = indices_root / name
         if not d.is_dir():
             continue
-        tifs = [p for p in d.glob("*.tif") if p.is_file()]
+        tifs = [p for p in d.glob("*.tif") if p.is_file() and "_cog" not in p.name.lower()]
         if not tifs:
             continue
         best = max(tifs, key=lambda p: p.stat().st_mtime)
-        out.append({"key": name, "kind": "index", "path": str(best), "label": f"Índice {name}"})
+        out.append({"key": name, "kind": "index", "path": str(best.resolve()), "label": f"Índice {name}"})
+    logger.info(
+        "Cluster: %s stack(s) de índice en %s",
+        len(out),
+        indices_root,
+    )
+    return out
+
+
+def discover_cluster_datasets(recortes_root: Path, indices_root: Path) -> list[dict[str, Any]]:
+    """
+    Compatibilidad: índices + (opcional) recortes multibanda.
+    El flujo óptico activo (S2/PS) usa solo ``discover_index_cluster_datasets``.
+    """
+    out = discover_index_cluster_datasets(indices_root)
 
     if recortes_root.is_dir():
         seen_keys: set[str] = set()
@@ -211,7 +224,7 @@ def discover_cluster_datasets(recortes_root: Path, indices_root: Path) -> list[d
                 }
             )
         logger.info(
-            "Cluster: %s dataset(s) índice + %s recorte(s) 6+ bandas en recortes/",
+            "Cluster (legacy): %s dataset(s) índice + %s recorte(s) 6+ bandas en recortes/",
             len([x for x in out if x["kind"] == "index"]),
             len([x for x in out if x["kind"] == "multiband"]),
         )

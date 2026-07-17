@@ -474,36 +474,45 @@ export default function SmartSoilModal({ open, onClose, token, projectId, projec
               <p className="adv-soilplus-dem-meta">
                 FCM (exponente m=2) solo sobre CV normalizado; triángulos = muestras en píxeles del raster.
               </p>
-              <div className={`adv-soilplus-image-frame adv-soilplus-image-frame--cluster adv-soilplus-cluster-scroll${soilClusterDragging ? " is-dragging" : ""}${soilClusterZoom > 1.01 ? " allow-pan-overflow" : ""}`} onWheel={handleSoilClusterWheel} onMouseDown={handleSoilClusterMouseDown} onMouseMove={handleSoilClusterMouseMove} onMouseUp={handleSoilClusterMouseUp} onMouseLeave={handleSoilClusterMouseUp}>
-                {soilClusterPreview ? (
-                  <div
-                    className="adv-soilplus-cluster-zoom-inner"
-                    style={{
-                      transform: `translate(${soilClusterPan.x}px, ${soilClusterPan.y}px) scale(${soilClusterZoom})`,
-                      transformOrigin: "center center",
-                    }}
-                  >
-                    <div className="adv-soilplus-cluster-img-lock">
-                      <img
-                        src={soilClusterPreview}
-                        alt="Zonificación FCM sobre CV"
-                        className={`adv-soilplus-image adv-soilplus-image--zoomable${soilClusterDragging ? " is-dragging" : ""}`}
-                        draggable={false}
-                        onLoad={(e) => {
-                          const im = e.currentTarget;
-                          setSoilClusterNaturalSize({ w: im.naturalWidth, h: im.naturalHeight });
-                        }}
-                      />
-                      <SoilFcmSampleTriangles
-                        points={soilSamplingPlan?.sample_points}
-                        viewWidth={soilClusterViewW}
-                        viewHeight={soilClusterViewH}
-                      />
+              <div className="adv-soilplus-image-frame adv-soilplus-image-frame--cluster">
+                <div
+                  className={`adv-soilplus-cluster-scroll${soilClusterDragging ? " is-dragging" : ""}${soilClusterZoom > 1.01 ? " allow-pan-overflow" : ""}`}
+                  onWheel={handleSoilClusterWheel}
+                  onMouseDown={handleSoilClusterMouseDown}
+                  onMouseMove={handleSoilClusterMouseMove}
+                  onMouseUp={handleSoilClusterMouseUp}
+                  onMouseLeave={handleSoilClusterMouseUp}
+                >
+                  {soilClusterPreview ? (
+                    <div
+                      className="adv-soilplus-cluster-zoom-inner"
+                      style={{
+                        transform: `translate(${soilClusterPan.x}px, ${soilClusterPan.y}px) scale(${soilClusterZoom})`,
+                        transformOrigin: "center center",
+                      }}
+                    >
+                      <div className="adv-soilplus-cluster-img-lock">
+                        <img
+                          src={soilClusterPreview}
+                          alt="Zonificación FCM sobre CV"
+                          className={`adv-soilplus-image adv-soilplus-image--zoomable${soilClusterDragging ? " is-dragging" : ""}`}
+                          draggable={false}
+                          onLoad={(e) => {
+                            const im = e.currentTarget;
+                            setSoilClusterNaturalSize({ w: im.naturalWidth, h: im.naturalHeight });
+                          }}
+                        />
+                        <SoilFcmSampleTriangles
+                          points={soilSamplingPlan?.sample_points}
+                          viewWidth={soilClusterViewW}
+                          viewHeight={soilClusterViewH}
+                        />
+                      </div>
                     </div>
-                  </div>
-                ) : (
-                  <p className="adv-soilplus-image-empty">Sin imagen de cluster. Pulsa Ejecutar.</p>
-                )}
+                  ) : (
+                    <p className="adv-soilplus-image-empty">Sin imagen de cluster. Pulsa Ejecutar.</p>
+                  )}
+                </div>
               </div>
             </section>
           </div>

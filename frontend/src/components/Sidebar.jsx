@@ -42,6 +42,8 @@ export default function Sidebar({
   projects,
   projectId,
   projectName,
+  projectStudyDateStart = "",
+  projectStudyDateEnd = "",
   setProjectName,
   mapLayers,
   targetRasterId,
@@ -77,6 +79,8 @@ export default function Sidebar({
   onHideLayer,
   onOpenDashboard,
   onOpenClientDashboard,
+  onOpenClientLanding,
+  onOpenAdminLanding,
   onOpenClientVisualization,
   onOpenSmartCluster,
   onOpenSmartSoil,
@@ -231,6 +235,19 @@ export default function Sidebar({
             >
               Dashboard
             </button>
+            <button
+              type="button"
+              className="layers-dashboard-btn"
+              onClick={() => onOpenAdminLanding?.()}
+              disabled={loading || !projectId}
+              title={
+                !projectId
+                  ? "Seleccione un proyecto para editar el informe narrativo"
+                  : "Abrir informe narrativo (edición admin)"
+              }
+            >
+              Informe narrativo
+            </button>
           </>
         ) : null}
         {canShowClientDashboardTab ? (
@@ -373,6 +390,21 @@ export default function Sidebar({
                   >
                     Compartir proyecto con usuario
                   </button>
+                  <button
+                    type="button"
+                    className="layers-dashboard-btn admin-project-delete-btn"
+                    onClick={() => {
+                      if (projectId) onDeleteProject(Number(projectId));
+                    }}
+                    disabled={loading || !projectId}
+                    title={
+                      projectId
+                        ? "Eliminar el proyecto seleccionado y todas sus capas"
+                        : "Seleccione un proyecto primero"
+                    }
+                  >
+                    Eliminar proyecto
+                  </button>
                 </div>
               ) : (
                 <div className="projects-empty">
@@ -407,6 +439,19 @@ export default function Sidebar({
           </button>
           <button
             type="button"
+            className="layers-dashboard-btn landing-narrative-btn"
+            onClick={() => onOpenClientLanding?.()}
+            disabled={loading || !projectId}
+            title={
+              projectId
+                ? "Abrir informe narrativo del proyecto (vista landing)"
+                : "Seleccione un proyecto en la lista"
+            }
+          >
+            Informe narrativo
+          </button>
+          <button
+            type="button"
             className="layers-dashboard-btn"
             onClick={() => onOpenClientVisualization?.()}
             disabled={loading || !projectId}
@@ -427,6 +472,7 @@ export default function Sidebar({
             onLogout={onLogout}
             email={email}
             readOnly
+            allowDelete
             title="Dashboard - Mis Proyectos"
           />
         </>
@@ -464,6 +510,8 @@ export default function Sidebar({
           token={token}
           projectId={projectId}
           loading={loading}
+          defaultStartDate={projectStudyDateStart}
+          defaultEndDate={projectStudyDateEnd}
           targetRasterId={targetRasterId}
           setTargetRasterId={setTargetRasterId}
           onUploadLote={onUploadLote}

@@ -1,9 +1,64 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import api, { API_URL, formatApiErrorDetail, setAuthToken } from "../api";
 import {
   formatRecorteDisplayName,
   rasterSortKeyFromMetadata,
 } from "../utils/geo";
+
+async function loadEmbeddedGalleryPreviewUrl(token, url, blobUrlsRef) {
+  if (!url) return null;
+  if (token) setAuthToken(token);
+  const base = API_URL.replace(/\/$/, "");
+  const apiPath = url.startsWith(base) ? url.slice(base.length) : url;
+  try {
+    const resp = await api.get(apiPath, { responseType: "blob" });
+    const raw = resp?.data;
+    const blob = raw instanceof Blob ? raw : new Blob([raw || ""]);
+    if (blob.size > 0) {
+      const objectUrl = URL.createObjectURL(blob);
+      blobUrlsRef.current.push(objectUrl);
+      return objectUrl;
+    }
+  } catch {
+    /* fallback fetch */
+  }
+  try {
+    const resp = await fetch(url, {
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      cache: "no-store",
+    });
+    if (!resp.ok) return null;
+    const blob = await resp.blob();
+    if (!blob.size) return null;
+    const objectUrl = URL.createObjectURL(blob);
+    blobUrlsRef.current.push(objectUrl);
+    return objectUrl;
+  } catch {
+    return null;
+  }
+}
+
+async function loadGalleryPreviewUrl(token, url, blobUrlsRef, embedded) {
+  if (embedded) {
+    return loadEmbeddedGalleryPreviewUrl(token, url, blobUrlsRef);
+  }
+  if (!url) return null;
+  try {
+    const resp = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+      cache: "no-store",
+    });
+    if (resp.ok) {
+      const blob = await resp.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      blobUrlsRef.current.push(objectUrl);
+      return objectUrl;
+    }
+  } catch (_) {
+    /* se muestra placeholder */
+  }
+  return null;
+}
 
 function isLegacyS2ZipBandRaster(meta) {
   if (!meta) return false;
@@ -282,7 +337,7 @@ function buildGalleryJpegBasename({
     return `IDXSAR_${String(activeIndexKey || "RVI").toUpperCase()}_${start}_${end} ${proj}`;
   if (mode === "view" && galleryVisualMode === "s1-vv") {
     const pol = s1PrepSigmaPol === "vh" ? "VH" : "VV";
-    return `S1PREP_${pol}_${String(s1VvPalette || "spectral")}_${start}_${end} ${proj}`;
+    return `S1PREP_${pol}_${String(s1VvPalette || "jet")}_${start}_${end} ${proj}`;
   }
   if (mode === "view" && galleryVisualMode === "s1-vh") return `S1GRD_VH_${start}_${end} ${proj}`;
   if (mode === "view" && galleryVisualMode === "s1-index") return `S1GRD_VHVV_${start}_${end} ${proj}`;
@@ -405,6 +460,33 @@ function labelIndexGalleryTab(galleryVisualMode, key) {
   return key;
 }
 
+/** Significado de los extremos de la paleta RdYlGn (bajo→alto) por índice. */
+const INDEX_SCALE_HINTS = {
+  NDVI: { low: "suelo expuesto / vegetación débil", high: "dosel denso / mayor vigor" },
+  EVI: { low: "baja biomasa / suelo visible", high: "dosel activo y estructurado" },
+  KNDVI: { low: "baja actividad foliar", high: "vegetación vigorosa" },
+  MSAVI2: { low: "suelo desnudo / plántulas dispersas", high: "mayor cobertura verde temprana" },
+  MTVI2: { low: "poca biomasa / dosel abierto", high: "mayor biomasa y estructura foliar" },
+  NDRE: { low: "posible deficiencia", high: "buena clorofila" },
+  CIRE: { low: "baja clorofila", high: "alta clorofila" },
+  MCARI: { low: "baja clorofila", high: "alta clorofila" },
+  TGI: { low: "clorosis", high: "follaje verde" },
+  GIYI: { low: "amarillamiento", high: "verdor intenso" },
+  VARI: { low: "follaje pálido", high: "follaje sano" },
+  RSTRUCTURE: { low: "huecos / faltantes", high: "dosel uniforme" },
+  NDWI: { low: "menor agua / posible estrés hídrico", high: "mayor contenido hídrico" },
+  RVI: { low: "menor respuesta de vegetación", high: "mayor biomasa / estructura radar" },
+  RFDI: { low: "menor contraste polarimétrico", high: "mayor contraste estructural" },
+  VV_VH: { low: "cociente polarimétrico bajo", high: "cociente polarimétrico alto" },
+  VH_VV: { low: "cociente polarimétrico bajo", high: "cociente polarimétrico alto" },
+  NRPB: { low: "señal polarimétrica más baja", high: "señal polarimétrica más alta" },
+};
+
+function indexScaleHints(indexKey) {
+  const k = String(indexKey || "").toUpperCase();
+  return INDEX_SCALE_HINTS[k] || { low: "estrés / bajo", high: "vigor / alto" };
+}
+
 /** Claves SAR para intersección de fechas en series de tiempo (``s1indices/``). */
 const S1_SAR_TS_INDEX_KEYS = ["RVI", "RFDI", "VV_VH", "VH_VV", "NRPB"];
 
@@ -445,7 +527,7 @@ function withPipelineVariant(url, pipelineVariant) {
 }
 
 /**
- * @param {"view" | "indexSelect" | "timeSeriesSelect" | "s1SarIndexSelect" | "s1SarTimeSeriesSelect"} mode - view: galería; indexSelect: S2 índices; s1SarIndexSelect: índices SAR (s1prepoceso); s1SarTimeSeriesSelect: fechas desde s1indices/
+ * @param {"view" | "indexSelect" | "timeSeriesSelect" | "s1SarIndexSelect" | "s1SarTimeSeriesSelect"} mode - view: galería; indexSelect: S2 índices; s1SarIndexSelect: índices SAR (s1preproceso); s1SarTimeSeriesSelect: fechas desde s1indices/
  * @param {"rgb" | "index" | "s1-sar-index" | "s1-vv" | "s1-vh" | "s1-index"} [galleryVisualMode] - view: RGB L2A, índices S2, índices SAR (``s1indices/``), o VV/VH/índice S1
  */
 export default function RgbTimeSeriesGallery({
@@ -465,6 +547,18 @@ export default function RgbTimeSeriesGallery({
   pipelineVariant = "s2",
   /** Nombre del proyecto para nombre sugerido al exportar JPEG */
   projectName = "",
+  /** Sin overlay modal: incrustado en landing u otra página */
+  embedded = false,
+  /** Limita pestañas de índices (p. ej. subgrupo Vigor / Nutrición) */
+  allowedIndexKeys = null,
+  /** Índice activo inicial cuando hay allowedIndexKeys */
+  initialIndexKey = null,
+  /** Notifica cambios de pestaña de índice (landing: lectura teórica). */
+  onActiveIndexChange = null,
+  /** Landing: fija polarización sigma0 (oculta botones VV/VH). */
+  fixedS1Pol = null,
+  /** Landing: fija paleta matplotlib (oculta selector). */
+  fixedS1Palette = null,
 }) {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -476,12 +570,32 @@ export default function RgbTimeSeriesGallery({
   /** null | clave de ayuda contextual (vista galería RGB / índices / S1). */
   const [galleryHelpKey, setGalleryHelpKey] = useState(null);
   const [exportBusy, setExportBusy] = useState(false);
-  /** Paleta matplotlib para galería Visual VV (s1prepoceso Sigma0 dB). */
-  const [s1VvPalette, setS1VvPalette] = useState("spectral");
-  /** Sigma0 en s1prepoceso: VV → Sigma0_VV_db.img, VH → Sigma0_VH_db.img */
-  const [s1PrepSigmaPol, setS1PrepSigmaPol] = useState("vv");
+  /** Paleta matplotlib para galería Visual VV (s1preproceso Sigma0 dB). */
+  const [s1VvPalette, setS1VvPalette] = useState(() =>
+    fixedS1Palette === "jet" || fixedS1Palette === "turbo" || fixedS1Palette === "spectral"
+      ? fixedS1Palette
+      : "jet"
+  );
+  /** Sigma0 en s1preproceso: VV → Sigma0_VV_db.img, VH → Sigma0_VH_db.img */
+  const [s1PrepSigmaPol, setS1PrepSigmaPol] = useState(() =>
+    String(fixedS1Pol || "vv").toLowerCase() === "vh" ? "vh" : "vv"
+  );
   const blobUrlsRef = useRef([]);
   const scrollRef = useRef(null);
+
+  const lockedS1Pol =
+    fixedS1Pol != null && String(fixedS1Pol).trim() !== ""
+      ? String(fixedS1Pol).toLowerCase() === "vh"
+        ? "vh"
+        : "vv"
+      : null;
+  const lockedS1Palette =
+    fixedS1Palette != null && String(fixedS1Palette).trim() !== ""
+      ? String(fixedS1Palette).toLowerCase()
+      : null;
+  const effectiveS1Pol = lockedS1Pol || s1PrepSigmaPol;
+  const effectiveS1Palette = lockedS1Palette || s1VvPalette;
+  const hideS1PolPaletteControls = lockedS1Pol != null || lockedS1Palette != null;
 
   const mainIndexIds =
     indexCatalog?.filter((o) => o.id !== "TODOS").map((o) => o.id) ?? [];
@@ -520,12 +634,29 @@ export default function RgbTimeSeriesGallery({
     !s1SarIndexMode &&
     !s1SarTsMode &&
     (galleryVisualMode === "index" || galleryVisualMode === "s1-sar-index");
-  const indexGalleryKeys =
+  const baseIndexGalleryKeys =
     galleryVisualMode === "s1-sar-index"
       ? GALLERY_S1_SAR_INDEX_KEYS
       : pipelineVariant === "ps"
         ? GALLERY_INDEX_KEYS_PS
         : GALLERY_INDEX_KEYS;
+  /**
+   * Identidad estable: sin useMemo, este array se recreaba en cada render y, al estar en las
+   * dependencias del efecto que sincroniza ``initialIndexKey``, reseteaba ``activeIndexKey`` al
+   * primer índice en cada re-render (todas las pestañas mostraban el mismo índice).
+   */
+  const allowedKeysSig = allowedIndexKeys?.length
+    ? allowedIndexKeys.map((k) => String(k).toUpperCase()).join(",")
+    : "";
+  const indexGalleryKeys = useMemo(
+    () =>
+      allowedKeysSig
+        ? baseIndexGalleryKeys.filter((k) =>
+            allowedKeysSig.split(",").includes(String(k).toUpperCase())
+          )
+        : baseIndexGalleryKeys,
+    [baseIndexGalleryKeys, allowedKeysSig]
+  );
   const s1VizMode = isS1GalleryVisualMode(galleryVisualMode);
 
   useEffect(() => {
@@ -538,16 +669,31 @@ export default function RgbTimeSeriesGallery({
   }, [open]);
 
   useEffect(() => {
-    if (!open) {
+    if (!open && !embedded) {
       setActiveIndexKey("NDVI");
       return;
     }
-    if (galleryVisualMode === "s1-sar-index") setActiveIndexKey("RVI");
-    else if (galleryVisualMode === "index") setActiveIndexKey("NDVI");
-  }, [open, galleryVisualMode]);
+    if (initialIndexKey && allowedIndexKeys?.length) {
+      const match = indexGalleryKeys.find(
+        (k) => String(k).toUpperCase() === String(initialIndexKey).toUpperCase()
+      );
+      if (match) {
+        setActiveIndexKey(match);
+        return;
+      }
+    }
+    if (galleryVisualMode === "s1-sar-index") setActiveIndexKey(indexGalleryKeys[0] || "RVI");
+    else if (galleryVisualMode === "index") setActiveIndexKey(indexGalleryKeys[0] || "NDVI");
+  }, [open, embedded, galleryVisualMode, initialIndexKey, allowedIndexKeys, indexGalleryKeys]);
 
   useEffect(() => {
-    if (!open || !projectId || !token) return undefined;
+    if (typeof onActiveIndexChange === "function") {
+      onActiveIndexChange(activeIndexKey);
+    }
+  }, [activeIndexKey, onActiveIndexChange]);
+
+  useEffect(() => {
+    if ((!open && !embedded) || !projectId || !token) return undefined;
 
     let cancelled = false;
     blobUrlsRef.current.forEach((u) => URL.revokeObjectURL(u));
@@ -584,20 +730,7 @@ export default function RgbTimeSeriesGallery({
                   `${base}/preprocess/recortes-preview/${projectId}?path=${encodeURIComponent(rel)}`,
                   pipelineVariant
                 );
-            let objectUrl = null;
-            try {
-              const resp = await fetch(url, {
-                headers: { Authorization: `Bearer ${token}` },
-                cache: "no-store",
-              });
-              if (resp.ok) {
-                const blob = await resp.blob();
-                objectUrl = URL.createObjectURL(blob);
-                blobUrlsRef.current.push(objectUrl);
-              }
-            } catch (_) {
-              /* se muestra placeholder */
-            }
+            const objectUrl = await loadGalleryPreviewUrl(token, url, blobUrlsRef, embedded);
             const label = formatSceneDateLabel(sk);
             loaded.push({
               id: `inv:${rel}`,
@@ -610,30 +743,17 @@ export default function RgbTimeSeriesGallery({
             });
           }
         } else if (mode === "s1SarIndexSelect") {
-          const invRes = await api.get(`/preprocess/s1-prepoceso-sar-scenes-inventory/${projectId}`);
+          const invRes = await api.get(`/preprocess/s1-preproceso-sar-scenes-inventory/${projectId}`);
           if (cancelled) return;
           const rows = Array.isArray(invRes.data?.items) ? invRes.data.items : [];
           for (const row of rows) {
             if (cancelled) break;
             const rel = row.scene_vv_relpath;
             if (!rel) continue;
-            const url = `${base}/preprocess/s1-prepoceso-sigma0-vv-preview/${projectId}?path=${encodeURIComponent(
+            const url = `${base}/preprocess/s1-preproceso-sigma0-vv-preview/${projectId}?path=${encodeURIComponent(
               rel
             )}&pol=vv&palette=spectral`;
-            let objectUrl = null;
-            try {
-              const resp = await fetch(url, {
-                headers: { Authorization: `Bearer ${token}` },
-                cache: "no-store",
-              });
-              if (resp.ok) {
-                const blob = await resp.blob();
-                objectUrl = URL.createObjectURL(blob);
-                blobUrlsRef.current.push(objectUrl);
-              }
-            } catch (_) {
-              /* placeholder */
-            }
+            const objectUrl = await loadGalleryPreviewUrl(token, url, blobUrlsRef, embedded);
             const label = formatSceneDateLabel(row.sort_key || "");
             loaded.push({
               id: `s1sar:${rel}`,
@@ -660,20 +780,7 @@ export default function RgbTimeSeriesGallery({
             const url = `${base}/preprocess/s1-sar-index-stacks-preview/${projectId}?path=${encodeURIComponent(
               rvi.relative_path
             )}&band=${bi}&index_palette=1`;
-            let objectUrl = null;
-            try {
-              const resp = await fetch(url, {
-                headers: { Authorization: `Bearer ${token}` },
-                cache: "no-store",
-              });
-              if (resp.ok) {
-                const blob = await resp.blob();
-                objectUrl = URL.createObjectURL(blob);
-                blobUrlsRef.current.push(objectUrl);
-              }
-            } catch (_) {
-              /* placeholder */
-            }
+            const objectUrl = await loadGalleryPreviewUrl(token, url, blobUrlsRef, embedded);
             const label = formatIsoDateDdMmYyyy(iso);
             loaded.push({
               id: `sarts:${iso}`,
@@ -707,29 +814,19 @@ export default function RgbTimeSeriesGallery({
                 )}${bandQ}&index_palette=1`,
                 pipelineVariant
               );
-              try {
-                const resp = await fetch(url, {
-                  headers: { Authorization: `Bearer ${token}` },
-                  cache: "no-store",
-                });
-                if (!resp.ok) continue;
-                const blob = await resp.blob();
-                const objectUrl = URL.createObjectURL(blob);
-                blobUrlsRef.current.push(objectUrl);
-                const label =
-                  spec.labelSuffix && idxName
-                    ? `${idxName} · ${spec.labelSuffix}`
-                    : idxName || spec.labelSuffix;
-                loaded.push({
-                  id: `idx:${row.relative_path}-b${spec.band}`,
-                  rasterLayerId: null,
-                  label,
-                  src: objectUrl,
-                  raw: row,
-                });
-              } catch (_) {
-                /* omitir */
-              }
+              const objectUrl = await loadGalleryPreviewUrl(token, url, blobUrlsRef, embedded);
+              if (!embedded && !objectUrl) continue;
+              const label =
+                spec.labelSuffix && idxName
+                  ? `${idxName} · ${spec.labelSuffix}`
+                  : idxName || spec.labelSuffix;
+              loaded.push({
+                id: `idx:${row.relative_path}-b${spec.band}`,
+                rasterLayerId: null,
+                label,
+                src: objectUrl,
+                raw: row,
+              });
             }
           }
         } else if (mode === "view" && galleryVisualMode === "s1-sar-index") {
@@ -754,35 +851,26 @@ export default function RgbTimeSeriesGallery({
               const url = `${base}/preprocess/s1-sar-index-stacks-preview/${projectId}?path=${encodeURIComponent(
                 row.relative_path
               )}${bandQ}&index_palette=1`;
-              try {
-                const resp = await fetch(url, {
-                  headers: { Authorization: `Bearer ${token}` },
-                  cache: "no-store",
-                });
-                if (!resp.ok) continue;
-                const blob = await resp.blob();
-                const objectUrl = URL.createObjectURL(blob);
-                blobUrlsRef.current.push(objectUrl);
-                const label =
-                  spec.labelSuffix && idxName
-                    ? `${idxName} · ${spec.labelSuffix}`
-                    : idxName || spec.labelSuffix;
-                loaded.push({
-                  id: `idx:${row.relative_path}-b${spec.band}`,
-                  rasterLayerId: null,
-                  label,
-                  src: objectUrl,
-                  raw: row,
-                });
-              } catch (_) {
-                /* omitir */
-              }
+              const objectUrl = await loadGalleryPreviewUrl(token, url, blobUrlsRef, embedded);
+              if (!embedded && !objectUrl) continue;
+              const label =
+                spec.labelSuffix && idxName
+                  ? `${idxName} · ${spec.labelSuffix}`
+                  : idxName || spec.labelSuffix;
+              loaded.push({
+                id: `idx:${row.relative_path}-b${spec.band}`,
+                rasterLayerId: null,
+                label,
+                src: objectUrl,
+                raw: row,
+              });
             }
           }
         } else if (mode === "view" && galleryVisualMode === "s1-vv") {
-          const pol = s1PrepSigmaPol === "vh" ? "vh" : "vv";
+          const pol = effectiveS1Pol === "vh" ? "vh" : "vv";
+          const palette = effectiveS1Palette || "jet";
           const invRes = await api.get(
-            `/preprocess/s1-prepoceso-sigma0-vv-inventory/${projectId}?pol=${encodeURIComponent(pol)}`
+            `/preprocess/s1-preproceso-sigma0-vv-inventory/${projectId}?pol=${encodeURIComponent(pol)}`
           );
           if (cancelled) return;
           const rows = Array.isArray(invRes.data?.items) ? invRes.data.items : [];
@@ -790,23 +878,10 @@ export default function RgbTimeSeriesGallery({
             if (cancelled) break;
             const rel = row.relative_path;
             if (!rel) continue;
-            const url = `${base}/preprocess/s1-prepoceso-sigma0-vv-preview/${projectId}?path=${encodeURIComponent(
+            const url = `${base}/preprocess/s1-preproceso-sigma0-vv-preview/${projectId}?path=${encodeURIComponent(
               rel
-            )}&pol=${encodeURIComponent(pol)}&palette=${encodeURIComponent(s1VvPalette)}`;
-            let objectUrl = null;
-            try {
-              const resp = await fetch(url, {
-                headers: { Authorization: `Bearer ${token}` },
-                cache: "no-store",
-              });
-              if (resp.ok) {
-                const blob = await resp.blob();
-                objectUrl = URL.createObjectURL(blob);
-                blobUrlsRef.current.push(objectUrl);
-              }
-            } catch (_) {
-              /* placeholder */
-            }
+            )}&pol=${encodeURIComponent(pol)}&palette=${encodeURIComponent(palette)}`;
+            const objectUrl = await loadGalleryPreviewUrl(token, url, blobUrlsRef, embedded);
             const label = formatSceneDateLabel(row.sort_key || "");
             loaded.push({
               id: `s1prep:${pol}:${rel}`,
@@ -838,26 +913,16 @@ export default function RgbTimeSeriesGallery({
           for (const r of rows) {
             if (cancelled) break;
             const url = `${base}/raster/${projectId}/${r.id}/preview?v=${r.id}${s1PreviewExtra}`;
-            try {
-              const resp = await fetch(url, {
-                headers: { Authorization: `Bearer ${token}` },
-                cache: "no-store",
-              });
-              if (!resp.ok) continue;
-              const blob = await resp.blob();
-              const objectUrl = URL.createObjectURL(blob);
-              blobUrlsRef.current.push(objectUrl);
-              const label = formatRecorteDisplayName(r.metadata, r.name) || r.name;
-              loaded.push({
-                id: r.id,
-                rasterLayerId: r.id,
-                label,
-                src: objectUrl,
-                raw: r,
-              });
-            } catch (_) {
-              /* omitir capa sin preview */
-            }
+            const objectUrl = await loadGalleryPreviewUrl(token, url, blobUrlsRef, embedded);
+            if (!embedded && !objectUrl) continue;
+            const label = formatRecorteDisplayName(r.metadata, r.name) || r.name;
+            loaded.push({
+              id: r.id,
+              rasterLayerId: r.id,
+              label,
+              src: objectUrl,
+              raw: r,
+            });
           }
         } else if (mode === "view" && galleryVisualMode === "rgb" && pipelineVariant === "ps") {
           const invRes = await api.get(
@@ -886,20 +951,7 @@ export default function RgbTimeSeriesGallery({
               `${base}/preprocess/recortes-preview/${projectId}?path=${encodeURIComponent(rel)}`,
               "ps"
             );
-            let objectUrl = null;
-            try {
-              const resp = await fetch(url, {
-                headers: { Authorization: `Bearer ${token}` },
-                cache: "no-store",
-              });
-              if (resp.ok) {
-                const blob = await resp.blob();
-                objectUrl = URL.createObjectURL(blob);
-                blobUrlsRef.current.push(objectUrl);
-              }
-            } catch (_) {
-              /* placeholder */
-            }
+            const objectUrl = await loadGalleryPreviewUrl(token, url, blobUrlsRef, embedded);
             const label = labelPsRgbFromBasename(basename);
             loaded.push({
               id: `psrgb:${rel}`,
@@ -946,32 +998,22 @@ export default function RgbTimeSeriesGallery({
                   ? "&index_palette=1"
                   : "";
               const url = `${base}/raster/${projectId}/${r.id}/preview?v=${r.id}${bandQ}${paletteQ}`;
-              try {
-                const resp = await fetch(url, {
-                  headers: { Authorization: `Bearer ${token}` },
-                  cache: "no-store",
-                });
-                if (!resp.ok) continue;
-                const blob = await resp.blob();
-                const objectUrl = URL.createObjectURL(blob);
-                blobUrlsRef.current.push(objectUrl);
-                let label =
-                  formatRecorteDisplayName(r.metadata, r.name) || r.name;
-                if (m.s2_index_stack && spec.labelSuffix) {
-                  label = `${idxName} · ${spec.labelSuffix}`;
-                }
-                const itemId =
-                  spec.band != null ? `${r.id}-b${spec.band}` : r.id;
-                loaded.push({
-                  id: itemId,
-                  rasterLayerId: r.id,
-                  label,
-                  src: objectUrl,
-                  raw: r,
-                });
-              } catch (_) {
-                /* omitir capa sin preview */
+              const objectUrl = await loadGalleryPreviewUrl(token, url, blobUrlsRef, embedded);
+              if (!embedded && !objectUrl) continue;
+              let label =
+                formatRecorteDisplayName(r.metadata, r.name) || r.name;
+              if (m.s2_index_stack && spec.labelSuffix) {
+                label = `${idxName} · ${spec.labelSuffix}`;
               }
+              const itemId =
+                spec.band != null ? `${r.id}-b${spec.band}` : r.id;
+              loaded.push({
+                id: itemId,
+                rasterLayerId: r.id,
+                label,
+                src: objectUrl,
+                raw: r,
+              });
             }
           }
         }
@@ -1000,6 +1042,7 @@ export default function RgbTimeSeriesGallery({
     };
   }, [
     open,
+    embedded,
     projectId,
     token,
     mode,
@@ -1008,8 +1051,8 @@ export default function RgbTimeSeriesGallery({
     s1SarTsMode,
     galleryVisualMode,
     activeIndexKey,
-    s1VvPalette,
-    s1PrepSigmaPol,
+    effectiveS1Pol,
+    effectiveS1Palette,
     pipelineVariant,
   ]);
 
@@ -1041,8 +1084,8 @@ export default function RgbTimeSeriesGallery({
         galleryVisualMode,
         pipelineVariant,
         activeIndexKey,
-        s1PrepSigmaPol,
-        s1VvPalette,
+        s1PrepSigmaPol: effectiveS1Pol,
+        s1VvPalette: effectiveS1Palette,
         items,
         projectName,
       });
@@ -1061,8 +1104,8 @@ export default function RgbTimeSeriesGallery({
     galleryVisualMode,
     pipelineVariant,
     activeIndexKey,
-    s1PrepSigmaPol,
-    s1VvPalette,
+    effectiveS1Pol,
+    effectiveS1Palette,
     projectName,
   ]);
 
@@ -1081,6 +1124,12 @@ export default function RgbTimeSeriesGallery({
     if (!open || !showIndexSwitcher) return undefined;
     const keys = indexGalleryKeys;
     function onKey(e) {
+      const t = e.target;
+      const tag = t && t.tagName ? t.tagName.toUpperCase() : "";
+      // No robar las flechas cuando se escribe en un campo (p. ej. editor de narrativa).
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (t && t.isContentEditable)) {
+        return;
+      }
       if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
         e.preventDefault();
         setActiveIndexKey((prev) => {
@@ -1200,7 +1249,8 @@ export default function RgbTimeSeriesGallery({
     onTimeSeries(uniq);
   }
 
-  if (!open) return null;
+  const galleryActive = embedded || open;
+  if (!galleryActive) return null;
 
   const title =
     mode === "timeSeriesSelect"
@@ -1218,7 +1268,9 @@ export default function RgbTimeSeriesGallery({
             ? "Visual índices SAR — serie temporal"
             : "Visual índices — serie temporal"
           : mode === "view" && galleryVisualMode === "s1-vv"
-            ? "Visual VV/VH — serie temporal"
+            ? effectiveS1Pol === "vh"
+              ? "Visual VH — serie temporal"
+              : "Visual VV — serie temporal"
             : mode === "view" && galleryVisualMode === "s1-vh"
               ? "Visual VH — serie temporal"
               : mode === "view" && galleryVisualMode === "s1-index"
@@ -1250,7 +1302,7 @@ export default function RgbTimeSeriesGallery({
       <>
         Marca los <strong>índices SAR</strong> (RVI, RFDI, …) y las <strong>escenas</strong>. Cada escena usa en la
         misma carpeta: <strong>VV</strong> = <code>Sigma0_VV_db.img</code>, <strong>VH</strong> ={" "}
-        <code>Sigma0_VH_db.img</code> (sigma0 dB bajo <code>s1prepoceso/</code>). Por cada índice, un stack en{" "}
+        <code>Sigma0_VH_db.img</code> (sigma0 dB bajo <code>s1preproceso/</code>). Por cada índice, un stack en{" "}
         <code>s1indices/&lt;ÍNDICE&gt;/</code> con <strong>una banda por fecha</strong> (orden cronológico).
       </>
     ) : indexMode ? (
@@ -1275,7 +1327,7 @@ export default function RgbTimeSeriesGallery({
           ? "No hay GeoTIFF PlanetScope (8+ bandas, nombre PS_*.tif) en recortesPS/. Ejecuta el paso 1 (recortes PS)."
           : "No hay GeoTIFF L2A (6+ bandas) en la carpeta recortes/. Ejecuta el paso 1 (Procesar recortes L2A)."
         : mode === "s1SarIndexSelect"
-          ? "No hay escenas con par VV+VH (Sigma0_VV_db.img y Sigma0_VH_db.img en la misma carpeta) en s1prepoceso/."
+          ? "No hay escenas con par VV+VH (Sigma0_VV_db.img y Sigma0_VH_db.img en la misma carpeta) en s1preproceso/."
         : showIndexSwitcher
           ? galleryVisualMode === "s1-sar-index"
             ? `No hay stack de ${labelS1SarIndexTab(activeIndexKey)} en disco (carpeta s1indices/${activeIndexKey}/). Estima índices SAR en la pestaña Sentinel-1 (paso 3).`
@@ -1283,9 +1335,9 @@ export default function RgbTimeSeriesGallery({
               ? `No hay stack de ${activeIndexKey} en disco (carpeta indecesPS/${activeIndexKey}/). Usa el paso 3 (Estimar índices) en esta pestaña Planet.`
               : `No hay stack de ${activeIndexKey} en disco (carpeta indices/${activeIndexKey}/). Usa el paso 3 (Estimar índices).`
           : mode === "view" && galleryVisualMode === "s1-vv"
-            ? s1PrepSigmaPol === "vh"
-              ? "No hay Sigma0_VH_db.img en la carpeta s1prepoceso/ del proyecto (o no se pudo leer ninguno)."
-              : "No hay Sigma0_VV_db.img en la carpeta s1prepoceso/ del proyecto (o no se pudo leer ninguno)."
+            ? effectiveS1Pol === "vh"
+              ? "No hay Sigma0_VH_db.img en la carpeta s1preproceso/ del proyecto (o no se pudo leer ninguno)."
+              : "No hay Sigma0_VV_db.img en la carpeta s1preproceso/ del proyecto (o no se pudo leer ninguno)."
             : mode === "view" && s1VizMode
               ? "No hay recortes Sentinel-1 (VV+VH) en el proyecto. Lista productos GRD en la pestaña SI y ejecuta recortes."
               : "No hay capas raster con vista RGB en este proyecto. Procesa recortes L2A en el paso 1 o sube un GeoTIFF Sentinel-2.";
@@ -1314,7 +1366,11 @@ export default function RgbTimeSeriesGallery({
 
   const headerZoomToolbar =
     !loading && items.length > 0 ? (
-      <div className="rgb-gallery-header-toolbar" role="group" aria-label="Zoom y exportación">
+      <div
+        className={`rgb-gallery-header-toolbar${showIndexSwitcher ? " rgb-gallery-header-toolbar--compact" : ""}`}
+        role="group"
+        aria-label="Zoom y exportación"
+      >
         <button
           type="button"
           className="rgb-gallery-zoom-btn"
@@ -1359,12 +1415,100 @@ export default function RgbTimeSeriesGallery({
       </div>
     ) : null;
 
-  return (
-    <div className="rgb-gallery-overlay" role="dialog" aria-modal="true" aria-label={title}>
-      <div className="rgb-gallery-backdrop" onClick={onClose} aria-hidden="true" />
-      <div className="rgb-gallery-window">
-        <div className="rgb-gallery-header">
+  const indexSwitcherEl = showIndexSwitcher ? (
+    <div
+      className="rgb-gallery-index-switcher rgb-gallery-index-switcher--inline"
+      role="toolbar"
+      aria-label={galleryVisualMode === "s1-sar-index" ? "Índice SAR a visualizar" : "Índice a visualizar"}
+    >
+      <button
+        type="button"
+        className="rgb-gallery-index-nav"
+        onClick={() => stepActiveIndex(-1)}
+        aria-label="Índice anterior"
+      >
+        ← Anterior
+      </button>
+      <div className="rgb-gallery-index-tabs">
+        {indexGalleryKeys.map((key) => (
+          <button
+            key={key}
+            type="button"
+            className={
+              key === activeIndexKey
+                ? "rgb-gallery-index-tab rgb-gallery-index-tab--active"
+                : "rgb-gallery-index-tab"
+            }
+            onClick={() => setActiveIndexKey(key)}
+          >
+            {labelIndexGalleryTab(galleryVisualMode, key)}
+          </button>
+        ))}
+      </div>
+      <button
+        type="button"
+        className="rgb-gallery-index-nav"
+        onClick={() => stepActiveIndex(1)}
+        aria-label="Siguiente índice"
+      >
+        Siguiente →
+      </button>
+    </div>
+  ) : null;
+
+  const scaleHints = indexScaleHints(activeIndexKey);
+  const indexScaleLegendEl = showIndexSwitcher ? (
+    <div
+      className="rgb-gallery-scale"
+      role="img"
+      aria-label={`Escala de color del índice: bajo (${scaleHints.low}) a alto (${scaleHints.high}), valores 0 a 1`}
+      title={`Bajo (${scaleHints.low})  →  Alto (${scaleHints.high})`}
+    >
+      <span className="rgb-gallery-scale-end rgb-gallery-scale-end--low">Bajo</span>
+      <div className="rgb-gallery-scale-track">
+        <div className="rgb-gallery-scale-bar" />
+        <div className="rgb-gallery-scale-ticks">
+          <span>0.0</span>
+          <span>0.5</span>
+          <span>1.0</span>
+        </div>
+      </div>
+      <span className="rgb-gallery-scale-end rgb-gallery-scale-end--high">Alto</span>
+    </div>
+  ) : null;
+
+  const showS1JetScale =
+    mode === "view" && galleryVisualMode === "s1-vv" && (hideS1PolPaletteControls || effectiveS1Palette === "jet");
+  const s1JetScaleLegendEl = showS1JetScale ? (
+    <div
+      className="rgb-gallery-scale"
+      role="img"
+      aria-label="Escala de color jet sigma0 dB: bajo a alto"
+      title="Paleta jet (sigma0 dB): bajo → alto"
+    >
+      <span className="rgb-gallery-scale-end rgb-gallery-scale-end--low">Bajo</span>
+      <div className="rgb-gallery-scale-track">
+        <div className="rgb-gallery-scale-bar rgb-gallery-scale-bar--jet" />
+        <div className="rgb-gallery-scale-ticks">
+          <span>bajo</span>
+          <span>σ⁰ dB</span>
+          <span>alto</span>
+        </div>
+      </div>
+      <span className="rgb-gallery-scale-end rgb-gallery-scale-end--high">Alto</span>
+    </div>
+  ) : null;
+
+  const windowEl = (
+    <>
+      <div className={`rgb-gallery-window${embedded ? " rgb-gallery-window--embedded" : ""}`}>
+        <div
+          className={`rgb-gallery-header${showIndexSwitcher || showS1JetScale ? " rgb-gallery-header--with-switcher" : ""}`}
+        >
           <h2 className="rgb-gallery-title">{title}</h2>
+          {indexSwitcherEl}
+          {indexScaleLegendEl}
+          {s1JetScaleLegendEl}
           {headerZoomToolbar}
           <div className="rgb-gallery-header-actions">
             {showViewGalleryInfoBtn ? (
@@ -1381,9 +1525,11 @@ export default function RgbTimeSeriesGallery({
                 </svg>
               </button>
             ) : null}
-            <button type="button" className="rgb-gallery-close" onClick={onClose} aria-label="Cerrar">
-              ×
-            </button>
+            {!embedded ? (
+              <button type="button" className="rgb-gallery-close" onClick={onClose} aria-label="Cerrar">
+                ×
+              </button>
+            ) : null}
           </div>
         </div>
         {subtitle ? <p className="rgb-gallery-sub">{subtitle}</p> : null}
@@ -1425,46 +1571,6 @@ export default function RgbTimeSeriesGallery({
             </div>
           </div>
         ) : null}
-        {showIndexSwitcher && (
-          <div
-            className="rgb-gallery-index-switcher"
-            role="toolbar"
-            aria-label={galleryVisualMode === "s1-sar-index" ? "Índice SAR a visualizar" : "Índice a visualizar"}
-          >
-            <button
-              type="button"
-              className="rgb-gallery-index-nav"
-              onClick={() => stepActiveIndex(-1)}
-              aria-label="Índice anterior"
-            >
-              ← Anterior
-            </button>
-            <div className="rgb-gallery-index-tabs">
-              {indexGalleryKeys.map((key) => (
-                <button
-                  key={key}
-                  type="button"
-                  className={
-                    key === activeIndexKey
-                      ? "rgb-gallery-index-tab rgb-gallery-index-tab--active"
-                      : "rgb-gallery-index-tab"
-                  }
-                  onClick={() => setActiveIndexKey(key)}
-                >
-                  {labelIndexGalleryTab(galleryVisualMode, key)}
-                </button>
-              ))}
-            </div>
-            <button
-              type="button"
-              className="rgb-gallery-index-nav"
-              onClick={() => stepActiveIndex(1)}
-              aria-label="Siguiente índice"
-            >
-              Siguiente →
-            </button>
-          </div>
-        )}
         {loading && <div className="rgb-gallery-status">Cargando vistas…</div>}
         {error && <div className="rgb-gallery-error">{error}</div>}
         {!loading && !error && items.length === 0 && (
@@ -1472,7 +1578,11 @@ export default function RgbTimeSeriesGallery({
         )}
         {!loading && items.length > 0 && (
           <>
-            {!loading && items.length > 0 && mode === "view" && galleryVisualMode === "s1-vv" ? (
+            {!loading &&
+            items.length > 0 &&
+            mode === "view" &&
+            galleryVisualMode === "s1-vv" &&
+            !hideS1PolPaletteControls ? (
               <div
                 className="rgb-gallery-toolbar rgb-gallery-toolbar--s1-only"
                 aria-label="Polarización y paleta sigma0"
@@ -1641,7 +1751,7 @@ export default function RgbTimeSeriesGallery({
                       : "Marca al menos un índice arriba (NDVI, EVI, …)"
                     : selectedIds.size === 0
                       ? mode === "s1SarIndexSelect"
-                        ? "Selecciona al menos una escena (VV+VH en s1prepoceso/)"
+                        ? "Selecciona al menos una escena (VV+VH en s1preproceso/)"
                         : "Selecciona al menos una escena (recorte L2A en recortes/)"
                       : undefined
               }
@@ -1760,10 +1870,9 @@ export default function RgbTimeSeriesGallery({
               {galleryHelpKey === "s1vv" ? (
                 <>
                   <p>
-                    En la barra inferior: <strong>VV</strong> o <strong>VH</strong> elige{" "}
-                    <code>Sigma0_VV_db.img</code> / <code>Sigma0_VH_db.img</code> bajo <code>s1prepoceso/</code>.
-                    Paleta matplotlib (Spectral, Jet o Turbo) y etiqueta <code>dd/mm/aaaa</code> desde{" "}
-                    <code>…_S1A_IW_GRDH_1SDV_YYYYMMDD</code>…
+                    Galería de <code>Sigma0_VV_db.img</code> / <code>Sigma0_VH_db.img</code> bajo{" "}
+                    <code>s1preproceso/</code>, coloreada con paleta <strong>jet</strong> (sigma0 dB). Etiqueta{" "}
+                    <code>dd/mm/aaaa</code> desde el nombre de escena.
                   </p>
                   <p>Zoom: Ctrl + rueda, botones +/− o la barra. Arrastra las barras para desplazarte.</p>
                   <p>
@@ -1799,6 +1908,21 @@ export default function RgbTimeSeriesGallery({
           </div>
         </div>
       ) : null}
+    </>
+  );
+
+  if (embedded) {
+    return (
+      <div className="rgb-gallery-embedded" role="region" aria-label={title}>
+        {windowEl}
+      </div>
+    );
+  }
+
+  return (
+    <div className="rgb-gallery-overlay" role="dialog" aria-modal="true" aria-label={title}>
+      <div className="rgb-gallery-backdrop" onClick={onClose} aria-hidden="true" />
+      {windowEl}
     </div>
   );
 }

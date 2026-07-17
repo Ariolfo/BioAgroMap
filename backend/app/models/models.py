@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, Column, Date, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Column, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from app.db.session import Base
@@ -121,6 +121,23 @@ class AIResult(Base):
     status = Column(String(50), nullable=False, default="queued")
     output_path = Column(Text)
     metrics = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class ProjectLandingText(Base):
+    """Textos narrativos por subsección de la landing (borrador vs publicado)."""
+
+    __tablename__ = "project_landing_texts"
+    __table_args__ = (UniqueConstraint("project_id", "section_key", name="uq_project_landing_texts_project_section"),)
+    id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    section_key = Column(String(120), nullable=False, index=True)
+    draft_body = Column(Text, nullable=False, default="")
+    published_body = Column(Text, nullable=False, default="")
+    updated_by_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    published_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 

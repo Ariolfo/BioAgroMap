@@ -29,10 +29,12 @@ export default function ProjectList({
   onLogout,
   email,
   readOnly = false,
+  allowDelete,
   title = "Mis Proyectos",
   /** Si ya se muestra sesión arriba (p. ej. en pestaña Ingresar admin), evitar duplicar Cerrar sesión. */
   hideSessionHeader = false,
 }) {
+  const canDelete = allowDelete ?? !readOnly;
   const [editingId, setEditingId] = useState(null);
   const [editingName, setEditingName] = useState("");
 
@@ -115,30 +117,34 @@ export default function ProjectList({
                     {p.id === Number(projectId) && (
                       <span className="projects-item-check">&#10003;</span>
                     )}
-                    {!readOnly ? (
+                    {!readOnly || canDelete ? (
                       <>
-                        <button
-                          type="button"
-                          className="projects-item-rename"
-                          title="Renombrar proyecto"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setEditingId(p.id);
-                            setEditingName(p.name);
-                          }}
-                        >
-                          &#9998;
-                        </button>
-                        <button
-                          className="projects-item-delete"
-                          title="Eliminar proyecto"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onDeleteProject(p.id);
-                          }}
-                        >
-                          &times;
-                        </button>
+                        {!readOnly ? (
+                          <button
+                            type="button"
+                            className="projects-item-rename"
+                            title="Renombrar proyecto"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setEditingId(p.id);
+                              setEditingName(p.name);
+                            }}
+                          >
+                            &#9998;
+                          </button>
+                        ) : null}
+                        {canDelete ? (
+                          <button
+                            className="projects-item-delete"
+                            title="Eliminar proyecto"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onDeleteProject(p.id);
+                            }}
+                          >
+                            &times;
+                          </button>
+                        ) : null}
                       </>
                     ) : null}
                   </>

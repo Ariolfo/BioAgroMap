@@ -4,7 +4,7 @@ import SensorTimelapseViewer from "./SensorTimelapseViewer";
 import ClientSoilViewModal from "./ClientSoilViewModal";
 import DemRoiEditor, { defaultRoi, soilRoiToQueryParam } from "./DemRoiEditor";
 import VegetationTimeSeriesCharts from "../VegetationTimeSeriesCharts";
-import ClimateTimeSeriesChart from "./ClimateTimeSeriesChart";
+import ClimateTimeSeriesChart, { CLIMATE_SERIES_COLORS } from "./ClimateTimeSeriesChart";
 import DashboardIaAnalysisModal, { DigitalBrainIcon } from "./DashboardIaAnalysisModal";
 
 const SENSOR_META = {
@@ -67,10 +67,10 @@ function buildRecorteRgbEndpoint(projectId, relativePath, pipelineVariant) {
   )}&pipeline_variant=${encodeURIComponent(pipelineVariant)}`;
 }
 
-/** Vista tipo «RGB» para S1: Sigma0 VV (SNAP/ENVI) bajo s1prepoceso/. */
+/** Vista tipo «RGB» para S1: Sigma0 VV (SNAP/ENVI) bajo s1preproceso/. */
 function buildS1Sigma0PreviewEndpoint(projectId, relativePath) {
   const base = API_URL.replace(/\/$/, "");
-  return `${base}/preprocess/s1-prepoceso-sigma0-vv-preview/${projectId}?path=${encodeURIComponent(
+  return `${base}/preprocess/s1-preproceso-sigma0-vv-preview/${projectId}?path=${encodeURIComponent(
     relativePath
   )}&pol=vv&palette=spectral`;
 }
@@ -563,7 +563,7 @@ export default function AdvancedDashboard({
           api.get(`/preprocess/index-stacks-inventory/${projectId}?pipeline_variant=ps`),
           api.get(`/preprocess/recortes-inventory/${projectId}?pipeline_variant=s2`).catch(() => ({ data: { items: [] } })),
           api.get(`/preprocess/recortes-inventory/${projectId}?pipeline_variant=ps`).catch(() => ({ data: { items: [] } })),
-          api.get(`/preprocess/s1-prepoceso-sigma0-vv-inventory/${projectId}?pol=vv`).catch(() => ({ data: { items: [] } })),
+          api.get(`/preprocess/s1-preproceso-sigma0-vv-inventory/${projectId}?pol=vv`).catch(() => ({ data: { items: [] } })),
           api.get(`/cluster-analysis/gmm-results/${projectId}?pipeline_variant=s1`).catch(() => ({ data: { results: [] } })),
           api.get(`/cluster-analysis/gmm-results/${projectId}?pipeline_variant=s2`).catch(() => ({ data: { results: [] } })),
           api.get(`/cluster-analysis/gmm-results/${projectId}?pipeline_variant=ps`).catch(() => ({ data: { results: [] } })),
@@ -1124,22 +1124,15 @@ export default function AdvancedDashboard({
     const roiPayload = roiPoints.length >= 3 ? { polygon_points: roiPoints } : null;
     let data = null;
     if (sensor === "s1") {
-      const frames = framesFor("s1");
-      const dates = [...new Set(frames.map((f) => normIso(f.date)))].slice(0, 24);
-      if (!dates.length) return null;
       const res = await api.post("/preprocess/s1-sar-time-series", {
         project_id: Number(projectId),
-        dates,
         roi_selection: roiPayload,
       });
       data = res.data;
     } else {
-      const recortePaths = (await ensureRecortes(sensor)).slice(0, 32);
-      if (!recortePaths.length) return null;
       const pv = sensor === "ps" ? "ps" : "s2";
       const res = await api.post("/preprocess/vegetation-time-series", {
         project_id: Number(projectId),
-        recorte_relative_paths: recortePaths,
         pipeline_variant: pv,
         max_pixel_series: 1800,
         random_seed: 42,
@@ -1374,7 +1367,7 @@ export default function AdvancedDashboard({
                 rightPaneLabel={s === "s1" ? "SAR VV" : "RGB"}
                 rgbEmptyMessage={
                   s === "s1"
-                    ? "Sin Sigma0 VV (s1prepoceso) ni recorte S1 para esta fecha."
+                    ? "Sin Sigma0 VV (s1preproceso) ni recorte S1 para esta fecha."
                     : "Sin recorte RGB para esta fecha."
                 }
                 opacity={opacityBySensor[s]}
@@ -1548,6 +1541,11 @@ export default function AdvancedDashboard({
                         type="checkbox"
                         checked={!!climateVars[k]}
                         onChange={(e) => setClimateVars((p) => ({ ...p, [k]: e.target.checked }))}
+                      />
+                      <span
+                        className="adv-climate-toggle-line"
+                        style={{ "--climate-toggle-color": CLIMATE_SERIES_COLORS[k] }}
+                        aria-hidden="true"
                       />
                       {label}
                     </label>
@@ -1848,44 +1846,46 @@ export default function AdvancedDashboard({
                   </button>
                   <span>{Math.round(soilClusterZoom * 100)}%</span>
                 </div>
-                <div
-                  className={`adv-soilplus-image-frame adv-soilplus-image-frame--cluster adv-soilplus-cluster-scroll${soilClusterDragging ? " is-dragging" : ""}${soilClusterZoom > 1.01 ? " allow-pan-overflow" : ""}`}
-                  onWheel={handleSoilClusterWheel}
-                  onMouseDown={handleSoilClusterMouseDown}
-                  onMouseMove={handleSoilClusterMouseMove}
-                  onMouseUp={handleSoilClusterMouseUp}
-                  onMouseLeave={handleSoilClusterMouseUp}
-                  title="Ctrl + rueda para zoom; click y arrastre para navegar"
-                >
-                  {soilClusterPreview ? (
-                    <div
-                      className="adv-soilplus-cluster-zoom-inner"
-                      style={{
-                        transform: `translate(${soilClusterPan.x}px, ${soilClusterPan.y}px) scale(${soilClusterZoom})`,
-                        transformOrigin: "center center",
-                      }}
-                    >
-                      <div className="adv-soilplus-cluster-img-lock">
-                        <img
-                          src={soilClusterPreview}
-                          alt="Zonificación FCM sobre CV"
-                          className={`adv-soilplus-image adv-soilplus-image--zoomable${soilClusterDragging ? " is-dragging" : ""}`}
-                          draggable={false}
-                          onLoad={(e) => {
-                            const im = e.currentTarget;
-                            setSoilClusterNaturalSize({ w: im.naturalWidth, h: im.naturalHeight });
-                          }}
-                        />
-                        <SoilFcmSampleTriangles
-                          points={soilSamplingPlan?.sample_points}
-                          viewWidth={soilClusterViewW}
-                          viewHeight={soilClusterViewH}
-                        />
+                <div className="adv-soilplus-image-frame adv-soilplus-image-frame--cluster">
+                  <div
+                    className={`adv-soilplus-cluster-scroll${soilClusterDragging ? " is-dragging" : ""}${soilClusterZoom > 1.01 ? " allow-pan-overflow" : ""}`}
+                    onWheel={handleSoilClusterWheel}
+                    onMouseDown={handleSoilClusterMouseDown}
+                    onMouseMove={handleSoilClusterMouseMove}
+                    onMouseUp={handleSoilClusterMouseUp}
+                    onMouseLeave={handleSoilClusterMouseUp}
+                    title="Ctrl + rueda para zoom; click y arrastre para navegar"
+                  >
+                    {soilClusterPreview ? (
+                      <div
+                        className="adv-soilplus-cluster-zoom-inner"
+                        style={{
+                          transform: `translate(${soilClusterPan.x}px, ${soilClusterPan.y}px) scale(${soilClusterZoom})`,
+                          transformOrigin: "center center",
+                        }}
+                      >
+                        <div className="adv-soilplus-cluster-img-lock">
+                          <img
+                            src={soilClusterPreview}
+                            alt="Zonificación FCM sobre CV"
+                            className={`adv-soilplus-image adv-soilplus-image--zoomable${soilClusterDragging ? " is-dragging" : ""}`}
+                            draggable={false}
+                            onLoad={(e) => {
+                              const im = e.currentTarget;
+                              setSoilClusterNaturalSize({ w: im.naturalWidth, h: im.naturalHeight });
+                            }}
+                          />
+                          <SoilFcmSampleTriangles
+                            points={soilSamplingPlan?.sample_points}
+                            viewWidth={soilClusterViewW}
+                            viewHeight={soilClusterViewH}
+                          />
+                        </div>
                       </div>
-                    </div>
-                  ) : (
-                    <p className="adv-soilplus-image-empty">Sin imagen de cluster. Pulsa Ejecutar.</p>
-                  )}
+                    ) : (
+                      <p className="adv-soilplus-image-empty">Sin imagen de cluster. Pulsa Ejecutar.</p>
+                    )}
+                  </div>
                 </div>
                 </section>
               </div>
