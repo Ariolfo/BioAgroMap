@@ -11,6 +11,7 @@ import LandingSectionNarrative from "../components/LandingSectionNarrative";
 import { indexKeysForLandingGroup, LANDING_INDEX_GROUPS } from "../interpretations";
 import {
   getSectionMeta,
+  interactiveSectionSubtitle,
   rgbSectionSubtitle,
   sectionAnchor,
   sensorShowsAgrogeofisica,
@@ -31,7 +32,6 @@ function NarrativeSlot({
   suffix,
   editMode,
   narrative,
-  allowImages = false,
   projectId = null,
   token = "",
   label,
@@ -45,7 +45,7 @@ function NarrativeSlot({
       onDraftChange={(v) => narrative?.setDraft?.(key, v)}
       displayBody={narrative?.bodyForDisplay?.(key) ?? ""}
       disabled={narrative?.saving}
-      allowImages={allowImages}
+      allowImages={Boolean(editMode)}
       projectId={projectId}
       token={token}
       label={label}
@@ -80,7 +80,7 @@ export default function LandingSensorBlock({
         id={sectionAnchor(sensorKey, "interactive")}
         num={meta("interactive")?.num}
         title={meta("interactive")?.title}
-        subtitle="Compare índice y RGB, explore el timelapse y las series de clima."
+        subtitle={interactiveSectionSubtitle(sensorKey)}
         variant="mint"
         headingLevel={3}
       >
@@ -94,7 +94,14 @@ export default function LandingSensorBlock({
           onReloadSeries={(selection) => extras?.reloadSeries?.(selection)}
           hideTitle
         />
-        <NarrativeSlot sensorKey={sensorKey} suffix="interactive" editMode={editMode} narrative={narrative} />
+        <NarrativeSlot
+          sensorKey={sensorKey}
+          suffix="interactive"
+          editMode={editMode}
+          narrative={narrative}
+          projectId={projectId}
+          token={token}
+        />
       </LandingSectionCard>
 
       <LandingSectionCard
@@ -123,6 +130,8 @@ export default function LandingSensorBlock({
                 suffix="rgb-vv"
                 editMode={editMode}
                 narrative={narrative}
+                projectId={projectId}
+                token={token}
                 label="Narrativa Visual VV (Markdown)"
               />
             </div>
@@ -142,6 +151,8 @@ export default function LandingSensorBlock({
                 suffix="rgb-vh"
                 editMode={editMode}
                 narrative={narrative}
+                projectId={projectId}
+                token={token}
                 label="Narrativa Visual VH (Markdown)"
               />
             </div>
@@ -155,7 +166,14 @@ export default function LandingSensorBlock({
               galleryVisualMode={rgbMode}
               pipelineVariant={pipelineVariant}
             />
-            <NarrativeSlot sensorKey={sensorKey} suffix="rgb" editMode={editMode} narrative={narrative} />
+            <NarrativeSlot
+              sensorKey={sensorKey}
+              suffix="rgb"
+              editMode={editMode}
+              narrative={narrative}
+              projectId={projectId}
+              token={token}
+            />
           </>
         )}
       </LandingSectionCard>
@@ -215,7 +233,14 @@ export default function LandingSensorBlock({
           error={extras?.clustersError}
           hideTitle
         />
-        <NarrativeSlot sensorKey={sensorKey} suffix="clusters" editMode={editMode} narrative={narrative} />
+        <NarrativeSlot
+          sensorKey={sensorKey}
+          suffix="clusters"
+          editMode={editMode}
+          narrative={narrative}
+          projectId={projectId}
+          token={token}
+        />
       </LandingSectionCard>
 
       {showSmart ? (
@@ -231,7 +256,14 @@ export default function LandingSensorBlock({
             psStClusters={extras?.psStClusters}
             hideTitle
           />
-          <NarrativeSlot sensorKey={sensorKey} suffix="smart-clusters" editMode={editMode} narrative={narrative} />
+          <NarrativeSlot
+            sensorKey={sensorKey}
+            suffix="smart-clusters"
+            editMode={editMode}
+            narrative={narrative}
+            projectId={projectId}
+            token={token}
+          />
         </LandingSectionCard>
       ) : null}
 
@@ -252,7 +284,14 @@ export default function LandingSensorBlock({
             error={extras?.soilError}
             hideTitle
           />
-          <NarrativeSlot sensorKey={sensorKey} suffix="agrogeofisica" editMode={editMode} narrative={narrative} />
+          <NarrativeSlot
+            sensorKey={sensorKey}
+            suffix="agrogeofisica"
+            editMode={editMode}
+            narrative={narrative}
+            projectId={projectId}
+            token={token}
+          />
         </LandingSectionCard>
       ) : null}
 
@@ -264,25 +303,16 @@ export default function LandingSensorBlock({
           variant="fern"
           headingLevel={3}
         >
-          {Number(projectId) !== 19 ? (
-            <LandingIaSection
-              projectId={projectId}
-              projectName={projectName}
-              adapted={adapted}
-              extras={extras}
-              sensorKey={sensorKey}
-              hideTitle
-            />
-          ) : null}
-          <NarrativeSlot
+          <LandingIaSection
+            projectId={projectId}
+            projectName={projectName}
+            adapted={adapted}
+            extras={extras}
             sensorKey={sensorKey}
-            suffix="ia"
+            hideTitle
             editMode={editMode}
             narrative={narrative}
-            allowImages
-            projectId={projectId}
             token={token}
-            label="Informe inteligente — texto e imágenes (Markdown)"
           />
         </LandingSectionCard>
       ) : null}

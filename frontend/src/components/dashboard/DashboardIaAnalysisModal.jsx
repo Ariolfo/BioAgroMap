@@ -1,7 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import api, { formatApiErrorDetail } from "../../api";
-import { appendPlanetIntegralAppendix, buildDashboardIaTechnicalReport } from "./dashboardIaAnalysis";
-import { ensureMortalidadFigures, getCustomIaReportUrl } from "./customIaReports";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { ensureMortalidadFigures } from "./customIaReports";
+import useDashboardIaReport from "./useDashboardIaReport";
 
 export function DigitalBrainIcon({ className, size = 22 }) {
   return (
@@ -232,92 +231,17 @@ function ReportTable({ header, rows, keyPrefix }) {
 export default function DashboardIaAnalysisModal({ open, onClose, iaContext, embedded = false }) {
   const printAreaRef = useRef(null);
   const [printing, setPrinting] = useState(false);
-  const [planetIntegral, setPlanetIntegral] = useState(null);
-  const [integralLoading, setIntegralLoading] = useState(false);
-  const [integralError, setIntegralError] = useState("");
-  const [customMarkdown, setCustomMarkdown] = useState("");
-  const [customLoading, setCustomLoading] = useState(false);
-  const [customError, setCustomError] = useState("");
 
-  const customReportUrl = useMemo(
-    () =>
-      iaContext
-        ? getCustomIaReportUrl({
-            projectId: iaContext.projectId,
-            projectName: iaContext.projectName,
-          })
-        : null,
-    [iaContext?.projectId, iaContext?.projectName],
-  );
-
-  const base = useMemo(() => {
-    if (!iaContext || customReportUrl) return { report: "", disclaimer: "" };
-    return buildDashboardIaTechnicalReport(iaContext);
-  }, [iaContext, customReportUrl]);
-
-  useEffect(() => {
-    if (!open || !iaContext?.projectId || customReportUrl) {
-      setPlanetIntegral(null);
-      setIntegralError("");
-      setIntegralLoading(false);
-      return undefined;
-    }
-    let cancelled = false;
-    setIntegralLoading(true);
-    setIntegralError("");
-    setPlanetIntegral(null);
-    (async () => {
-      try {
-        const { data } = await api.get(`/preprocess/dashboard-ia-planet-integral/${iaContext.projectId}`, {
-          params: { max_scenes: 48 },
-        });
-        if (!cancelled) setPlanetIntegral(data);
-      } catch (e) {
-        if (!cancelled) setIntegralError(formatApiErrorDetail(e));
-      } finally {
-        if (!cancelled) setIntegralLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [open, iaContext?.projectId, customReportUrl]);
-
-  useEffect(() => {
-    if (!open || !customReportUrl) {
-      setCustomMarkdown("");
-      setCustomError("");
-      setCustomLoading(false);
-      return undefined;
-    }
-    let cancelled = false;
-    setCustomLoading(true);
-    setCustomError("");
-    (async () => {
-      try {
-        const res = await fetch(`${customReportUrl}?v=${Date.now()}`, { cache: "no-store" });
-        if (!res.ok) throw new Error(`No se pudo cargar el informe (${res.status})`);
-        const text = await res.text();
-        if (!cancelled) setCustomMarkdown(text);
-      } catch (e) {
-        if (!cancelled) setCustomError(e?.message || "Error al cargar el informe");
-      } finally {
-        if (!cancelled) setCustomLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [open, customReportUrl]);
-
-  const fullReport = useMemo(() => {
-    if (customReportUrl) return customMarkdown;
-    let r = base.report;
-    if (planetIntegral) r = appendPlanetIntegralAppendix(r, planetIntegral);
-    return r;
-  }, [customReportUrl, customMarkdown, base.report, planetIntegral]);
-
-  const isCustom = !!customReportUrl;
+  const {
+    fullReport,
+    isCustom,
+    reportLoading,
+    reportReady: markdownReady,
+    integralLoading,
+    integralError,
+    customLoading,
+    customError,
+  } = useDashboardIaReport(iaContext, { enabled: open || embedded });
 
   const blocks = useMemo(() => {
     let parsed = formatBlocks(fullReport);
@@ -325,8 +249,7 @@ export default function DashboardIaAnalysisModal({ open, onClose, iaContext, emb
     return parsed;
   }, [fullReport, isCustom]);
 
-  const reportLoading = customLoading || (!isCustom && integralLoading);
-  const reportReady = blocks.length > 0 && !reportLoading && !customError;
+  const reportReady = blocks.length > 0 && markdownReady;
 
   const handlePrintPdf = useCallback(async () => {
     const root = printAreaRef.current;

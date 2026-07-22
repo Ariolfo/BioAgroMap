@@ -202,13 +202,14 @@ export default function useLandingProjectData(projectId, token) {
     setError("");
     try {
       setAuthToken(token);
-      const [s1Inv, s2Inv, psInv, s2Rec, psRec, s1PrepVv, layersRes] = await Promise.all([
+      const [s1Inv, s2Inv, psInv, s2Rec, psRec, s1PrepVv, s1PrepVh, layersRes] = await Promise.all([
         api.get(`/preprocess/s1-sar-index-stacks-inventory/${projectId}`),
         api.get(`/preprocess/index-stacks-inventory/${projectId}?pipeline_variant=s2`),
         api.get(`/preprocess/index-stacks-inventory/${projectId}?pipeline_variant=ps`),
         api.get(`/preprocess/recortes-inventory/${projectId}?pipeline_variant=s2`).catch(() => ({ data: { items: [] } })),
         api.get(`/preprocess/recortes-inventory/${projectId}?pipeline_variant=ps`).catch(() => ({ data: { items: [] } })),
         api.get(`/preprocess/s1-preproceso-sigma0-vv-inventory/${projectId}?pol=vv`).catch(() => ({ data: { items: [] } })),
+        api.get(`/preprocess/s1-preproceso-sigma0-vv-inventory/${projectId}?pol=vh`).catch(() => ({ data: { items: [] } })),
         api.get(`/layers/${projectId}`).catch(() => ({ data: [] })),
       ]);
 
@@ -219,6 +220,7 @@ export default function useLandingProjectData(projectId, token) {
         s2Recortes: s2Rec.data?.items || [],
         psRecortes: psRec.data?.items || [],
         s1PrepVv: s1PrepVv.data?.items || [],
+        s1PrepVh: s1PrepVh.data?.items || [],
       });
       setAdapted(nextAdapted);
       adaptedRef.current = nextAdapted;

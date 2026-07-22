@@ -63,6 +63,25 @@ _INDEX_KEYS_UPPER = {x.upper() for x in LANDING_INDEX_KEYS}
 
 
 def canonical_section_keys() -> list[str]:
+    # Índices ópticos reales por sensor (CIre solo S2; PS usa catálogo Planet).
+    optical_by_sensor = {
+        "ps": {
+            "NDVI",
+            "EVI",
+            "NDWI",
+            "MSAVI2",
+            "MTVI2",
+            "VARI",
+            "TGI",
+            "KNDVI",
+            "GIYI",
+            "MCARI",
+            "NDRE",
+            "RSTRUCTURE",
+        },
+        "s2": {"NDVI", "EVI", "NDWI", "CIre", "MCARI"},
+        "s1": {"RVI", "RFDI", "VV_VH", "VH_VV", "NRPB"},
+    }
     keys: list[str] = []
     for sensor in LANDING_SENSOR_KEYS:
         for suffix in LANDING_SECTION_SUFFIXES:
@@ -73,8 +92,10 @@ def canonical_section_keys() -> list[str]:
             if suffix == "rgb" and sensor == "s1":
                 continue
             keys.append(f"landing-{sensor}-{suffix}")
+        allow = optical_by_sensor.get(sensor) or set()
         for ik in LANDING_INDEX_KEYS:
-            keys.append(f"landing-{sensor}-index-{ik}")
+            if ik in allow or ik.upper() in {x.upper() for x in allow}:
+                keys.append(f"landing-{sensor}-index-{ik}")
     return keys
 
 

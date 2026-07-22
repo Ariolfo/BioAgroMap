@@ -219,7 +219,7 @@ def _assemble_s1_cluster_datasets(
 
 
 # Cambiar al añadir comportamiento visible (comprobar con GET /cluster-analysis/capabilities).
-CLUSTER_PIPELINE_BUILD = "2026-07-14b.s2-indices-stacks-only"
+CLUSTER_PIPELINE_BUILD = "2026-07-20a.s1-background-nodata-mask"
 
 
 @router.get("/cluster-analysis/capabilities")

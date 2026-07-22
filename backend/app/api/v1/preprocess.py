@@ -5,7 +5,7 @@ import math
 import re
 import tempfile
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -1119,14 +1119,60 @@ def dashboard_ia_planet_integral(
     return {"scenes": rows, "summary": summary, "narrative": narrative}
 
 
+_SOILPLUS_DEM_PREFERRED = (
+    "band_1.img",
+    "band_1.tif",
+    "band_1.tiff",
+    "band_1.geotiff",
+)
+_SOILPLUS_DEM_EXTS = {".img", ".tif", ".tiff", ".geotiff"}
+
+
+def _resolve_soilplus_dem_path(dem_dir: Path) -> Path | None:
+    """
+    Localiza el DEM de entrada en ``dem/``.
+
+    Prioridad: ``band_1.img`` (legado ENVI), luego ``band_1.tif`` / ``.tiff``,
+    y por último cualquier GeoTIFF DEM en la carpeta (p. ej. ``DEM_*.tif``),
+    excluyendo salidas ``soilplus_saved_*``.
+    """
+    dem_dir = Path(dem_dir)
+    if not dem_dir.is_dir():
+        return None
+    for name in _SOILPLUS_DEM_PREFERRED:
+        p = dem_dir / name
+        if p.is_file():
+            return p
+    candidates: list[tuple[int, str, Path]] = []
+    for p in dem_dir.iterdir():
+        if not p.is_file():
+            continue
+        low = p.name.lower()
+        if low.startswith("soilplus_saved_"):
+            continue
+        if p.suffix.lower() not in _SOILPLUS_DEM_EXTS:
+            continue
+        # Preferir nombres con "dem" cuando hay varios GeoTIFF sueltos.
+        score = 0 if "dem" in low else 1
+        candidates.append((score, low, p))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda t: (t[0], t[1]))
+    return candidates[0][2]
+
+
 def _load_soilplus_dem_band1(
     project_id: int, tenant_id: int
 ) -> tuple[Path, np.ndarray, np.ndarray, rasterio.Affine]:
-    dem_path = _tenant_storage(tenant_id, project_id, "dem") / "band_1.img"
-    if not dem_path.is_file():
+    dem_dir = _tenant_storage(tenant_id, project_id, "dem")
+    dem_path = _resolve_soilplus_dem_path(dem_dir)
+    if dem_path is None:
         raise HTTPException(
             status_code=404,
-            detail=f"No existe imagen DEM de entrada para Soil+: {dem_path}",
+            detail=(
+                f"No existe imagen DEM de entrada para Soil+ en {dem_dir} "
+                "(busca band_1.img / band_1.tif o un GeoTIFF DEM)."
+            ),
         )
     try:
         with rasterio.open(dem_path) as src:
@@ -1960,8 +2006,8 @@ def get_soilplus_dem_input_stats(
     tenant_id: int = Depends(tenant_from_jwt),
 ):
     """
-    Fuente de entrada fija para Soil+:
-    data/storage/tenant_{tenant}/project_{project}/dem/band_1.img
+    Fuente de entrada para Soil+ en ``dem/``:
+    ``band_1.img`` (legado), ``band_1.tif`` / ``.tiff``, u otro GeoTIFF DEM.
     """
     project = require_project_dashboard_access(db, user, tenant_id, project_id)
 
@@ -2326,6 +2372,46 @@ def _soilplus_upscale_image(img: Image.Image, max_dim: int = 420, *, nearest: bo
     return img.resize((max(1, int(round(w * scale))), max(1, int(round(h * scale)))), resample)
 
 
+def _soilplus_overlay_sample_triangles(
+    img: Image.Image,
+    sample_points: list | None,
+    *,
+    grid_h: int,
+    grid_w: int,
+) -> Image.Image:
+    """Dibuja triángulos de muestreo (mismo criterio visual que Smart Soil) sobre el cluster."""
+    from PIL import ImageDraw
+
+    points = sample_points if isinstance(sample_points, list) else []
+    if not points or grid_h <= 0 or grid_w <= 0:
+        return img
+
+    out = img.convert("RGBA")
+    out_w, out_h = out.size
+    sx = out_w / float(grid_w)
+    sy = out_h / float(grid_h)
+    radius = max(6, int(round(min(sx, sy) * 0.42)))
+    draw = ImageDraw.Draw(out)
+    for point in points:
+        try:
+            col = float(point["col"])
+            row = float(point["row"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        x = (col + 0.5) * sx
+        y = (row + 0.5) * sy
+        triangle = [
+            (x, y - radius),
+            (x - radius * 0.92, y + radius * 0.58),
+            (x + radius * 0.92, y + radius * 0.58),
+        ]
+        # Amarillo alto contraste (como en Smart Soil / Markdown) para no fundirse con el cluster.
+        draw.polygon(triangle, fill=(255, 241, 118, 240), outline=(255, 255, 255, 255))
+        # Contorno oscuro fino para legibilidad sobre zonas claras.
+        draw.line(triangle + [triangle[0]], fill=(40, 40, 40, 220), width=max(1, radius // 5))
+    return out
+
+
 def _soilplus_label_panel(img: Image.Image, title: str, cell_w: int, cell_h: int) -> Image.Image:
     """Centra el panel en una celda blanca con título superior."""
     from PIL import ImageDraw, ImageFont
@@ -2404,6 +2490,15 @@ def _build_soilplus_landing_mosaic(
         420,
         nearest=True,
     )
+    shape = meta.get("raster_shape") or {}
+    grid_h = int(shape.get("height") or lab_map.shape[0])
+    grid_w = int(shape.get("width") or lab_map.shape[1])
+    cluster_img = _soilplus_overlay_sample_triangles(
+        cluster_img,
+        meta.get("sample_points"),
+        grid_h=grid_h,
+        grid_w=grid_w,
+    )
 
     cell_w, cell_h = 520, 460
     gap = 12
@@ -2411,7 +2506,7 @@ def _build_soilplus_landing_mosaic(
         _soilplus_label_panel(dem_gray, "1.1 DEM (valores válidos)", cell_w, cell_h),
         _soilplus_label_panel(dem_elev, "1.2 DEM (altura)", cell_w, cell_h),
         _soilplus_label_panel(cv_img, "2.1 CV", cell_w, cell_h),
-        _soilplus_label_panel(cluster_img, "2.2 Clusters", cell_w, cell_h),
+        _soilplus_label_panel(cluster_img, "2.2 Clusters (puntos de muestreo)", cell_w, cell_h),
     ]
     mosaic = Image.new("RGB", (cell_w * 2 + gap * 3, cell_h * 2 + gap * 3), (250, 251, 248))
     positions = [(gap, gap), (gap * 2 + cell_w, gap), (gap, gap * 2 + cell_h), (gap * 2 + cell_w, gap * 2 + cell_h)]
@@ -2818,7 +2913,7 @@ def get_soilplus_elbow(
                     elbow_k = k
     return {
         "project_id": int(project_id),
-        "source": "dem/band_1.img",
+        "source": "dem/(band_1.img|band_1.tif|DEM_*.tif)",
         "ks": ks,
         "wcss": wcss,
         "elbow_k": elbow_k,
@@ -4008,6 +4103,80 @@ def preprocess_s2_l2a_recortes(
             ),
         ) from exc
     return {"status": "queued", "task_id": async_result.id}
+
+
+_LANDING_MARKDOWN_NAMES = {
+    "PS": "landing_narrativa_PS.md",
+    "S1": "landing_narrativa_S1.md",
+    "S2": "landing_narrativa_S2.md",
+}
+
+
+@router.post("/preprocess/landing-markdown-generate/{project_id}")
+def landing_markdown_generate(
+    project_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """Encola la generación de los 3 Markdown de la landing (PS, S1, S2), cada uno ≤ 4.9 MB."""
+    from app.tasks.jobs import landing_markdown_pipeline
+
+    require_project_dashboard_access(db, user, tenant_id, project_id)
+    try:
+        async_result = landing_markdown_pipeline.delay(project_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"No se pudo encolar la generación de Markdown (Redis/worker): {exc!s}",
+        ) from exc
+    return {"status": "queued", "task_id": async_result.id}
+
+
+@router.get("/preprocess/landing-markdown-files/{project_id}")
+def landing_markdown_files(
+    project_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """Lista los Markdown generados en ``markdown/`` con tamaño y fecha."""
+    require_project_dashboard_access(db, user, tenant_id, project_id)
+    md_dir = _tenant_storage(tenant_id, project_id, "markdown")
+    files = []
+    for sensor, name in _LANDING_MARKDOWN_NAMES.items():
+        p = md_dir / name
+        if not p.is_file():
+            continue
+        st = p.stat()
+        files.append(
+            {
+                "sensor": sensor,
+                "name": name,
+                "size_mb": round(st.st_size / (1024 * 1024), 2),
+                "modified_at": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
+            }
+        )
+    return {"project_id": project_id, "files": files, "max_md_mb": 4.9}
+
+
+@router.get("/preprocess/landing-markdown-download/{project_id}")
+def landing_markdown_download(
+    project_id: int,
+    sensor: str = Query(..., description="PS, S1 o S2"),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    tenant_id: int = Depends(tenant_from_jwt),
+):
+    """Descarga uno de los Markdown generados."""
+    require_project_dashboard_access(db, user, tenant_id, project_id)
+    name = _LANDING_MARKDOWN_NAMES.get(str(sensor).strip().upper())
+    if not name:
+        raise HTTPException(status_code=400, detail="sensor debe ser PS, S1 o S2")
+    p = _tenant_storage(tenant_id, project_id, "markdown") / name
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail=f"No existe {name}; genera los Markdown primero.")
+    return FileResponse(p, media_type="text/markdown", filename=name)
 
 
 @router.get("/preprocess/task-status/{task_id}")

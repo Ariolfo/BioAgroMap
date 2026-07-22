@@ -84,6 +84,7 @@ export default function Sidebar({
   onOpenClientVisualization,
   onOpenSmartCluster,
   onOpenSmartSoil,
+  onOpenMarkdownReports,
   onOpenUserManagement,
   onUploadLote,
   onUploadRaster,
@@ -612,6 +613,19 @@ export default function Sidebar({
             title={!projectId ? "Seleccione un proyecto en la lista" : "Abrir Smart Soil"}
           >
             Smart Soil
+          </button>
+          <button
+            type="button"
+            className="layers-dashboard-btn"
+            onClick={() => onOpenMarkdownReports?.()}
+            disabled={loading || !projectId}
+            title={
+              !projectId
+                ? "Seleccione un proyecto en la lista"
+                : "Generar/descargar los Markdown narrativos (PS, S1, S2)"
+            }
+          >
+            Markdown
           </button>
         </>
       ) : null}

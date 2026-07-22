@@ -4,11 +4,12 @@ import { renderSimpleMarkdown } from "../simpleMarkdown";
 import { fetchAuthedImageDataUrl } from "../previewUtils";
 
 const API_IMG_SRC_RE = /src="(\/api\/[^"]+)"/g;
+const IMAGE_MIME_RE = /^image\/(png|jpeg|jpg|webp|gif)$/i;
 
 /**
  * Texto narrativo bajo una subsección.
  * - editMode: textarea markdown (admin)
- * - allowImages: botón para subir imagen e insertar ![alt](url)
+ * - allowImages: botón para subir imagen / pegar (Ctrl+V) e insertar ![alt](url)
  * - read: render markdown; si vacío no muestra nada
  */
 export default function LandingSectionNarrative({
@@ -29,6 +30,7 @@ export default function LandingSectionNarrative({
   /** src /api/... → data-URL (imágenes protegidas por JWT). */
   const [resolvedImgs, setResolvedImgs] = useState({});
 
+  const canUploadImages = Boolean(allowImages && projectId && token);
   const rawHtml = useMemo(
     () => (editMode ? "" : renderSimpleMarkdown(displayBody)),
     [editMode, displayBody]
@@ -75,16 +77,35 @@ export default function LandingSectionNarrative({
     });
   };
 
-  const onPickImage = async (e) => {
-    const file = e.target.files?.[0];
-    e.target.value = "";
+  const uploadImageFile = async (file) => {
     if (!file || !projectId || !token) return;
+    const mime = String(file.type || "").toLowerCase();
+    if (mime && !IMAGE_MIME_RE.test(mime)) {
+      setUploadError("Solo se admiten PNG, JPEG, WebP o GIF.");
+      return;
+    }
     setUploading(true);
     setUploadError("");
     try {
       setAuthToken(token);
       const form = new FormData();
-      form.append("file", file);
+      // Clipboard puede entregar File sin nombre: forzamos extensión válida.
+      let named = file;
+      if (!file.name || !/\.(png|jpe?g|webp|gif)$/i.test(file.name)) {
+        const mime = String(file.type || "image/png").toLowerCase();
+        const ext =
+          mime.includes("jpeg") || mime.includes("jpg")
+            ? ".jpg"
+            : mime.includes("webp")
+              ? ".webp"
+              : mime.includes("gif")
+                ? ".gif"
+                : ".png";
+        named = new File([file], `imagen_pegada_${Date.now()}${ext}`, {
+          type: file.type || "image/png",
+        });
+      }
+      form.append("file", named);
       const res = await api.post(`/projects/${projectId}/landing-media`, form, {
         headers: { "Content-Type": "multipart/form-data" },
       });
@@ -97,6 +118,32 @@ export default function LandingSectionNarrative({
     }
   };
 
+  const onPickImage = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    await uploadImageFile(file);
+  };
+
+  const onPasteImage = async (e) => {
+    if (!canUploadImages || disabled || uploading) return;
+    const items = e.clipboardData?.items;
+    if (!items?.length) return;
+    let imageFile = null;
+    for (const item of items) {
+      if (item.kind === "file" && IMAGE_MIME_RE.test(item.type || "")) {
+        imageFile = item.getAsFile();
+        break;
+      }
+    }
+    if (!imageFile && e.clipboardData?.files?.length) {
+      const f = e.clipboardData.files[0];
+      if (f && IMAGE_MIME_RE.test(f.type || "")) imageFile = f;
+    }
+    if (!imageFile) return;
+    e.preventDefault();
+    await uploadImageFile(imageFile);
+  };
+
   if (editMode) {
     return (
       <div className="landing-narrative-editor" data-section-key={sectionKey}>
@@ -104,7 +151,7 @@ export default function LandingSectionNarrative({
           <label className="landing-narrative-editor-label" htmlFor={`narr-${sectionKey}`}>
             {label}
           </label>
-          {allowImages ? (
+          {canUploadImages ? (
             <div className="landing-narrative-editor-actions">
               <button
                 type="button"
@@ -126,20 +173,22 @@ export default function LandingSectionNarrative({
         </div>
         <textarea
           id={`narr-${sectionKey}`}
-          className={`landing-narrative-textarea${allowImages ? " landing-narrative-textarea--tall" : ""}`}
-          rows={allowImages ? 10 : 5}
+          className={`landing-narrative-textarea${canUploadImages ? " landing-narrative-textarea--tall" : ""}`}
+          rows={canUploadImages ? 10 : 5}
           value={draftValue}
           disabled={disabled || uploading}
           placeholder={
-            allowImages
-              ? "Escribe texto (Markdown) y/o sube imágenes. Ej.: **negrita**, listas -, ## título, ![foto](url)"
+            canUploadImages
+              ? "Escribe texto (Markdown), sube una imagen o pégala con Ctrl+V. Ej.: **negrita**, ![foto](url)"
               : "Escribe aquí la narrativa de esta sección (Markdown: **negrita**, listas -, ## título…)"
           }
           onChange={(e) => onDraftChange?.(e.target.value)}
+          onPaste={onPasteImage}
         />
-        {allowImages ? (
+        {canUploadImages ? (
           <p className="landing-narrative-hint">
-            Las imágenes se insertan como Markdown <code>![alt](url)</code> y se muestran al publicar.
+            Imágenes: botón <strong>Subir imagen</strong> o pegar con <kbd>Ctrl</kbd>+<kbd>V</kbd>.
+            Se insertan como Markdown <code>![alt](url)</code> y se ven al publicar.
           </p>
         ) : null}
         {uploadError ? <p className="landing-narrative-error">{uploadError}</p> : null}

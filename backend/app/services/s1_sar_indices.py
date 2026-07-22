@@ -107,30 +107,39 @@ def _db_to_linear(db: np.ndarray) -> np.ndarray:
 
 
 def compute_sar_index_array(vv_lin: np.ndarray, vh_lin: np.ndarray, index_key: str) -> np.ndarray:
-    """Índices en potencia lineal (sigma0)."""
+    """
+    Índices en potencia lineal (sigma0). Los píxeles sin dato (NaN/inf en VV o VH,
+    p. ej. fondo fuera del footprint) se propagan como NaN para que el clustering
+    los excluya en lugar de tratarlos como una clase más.
+    """
     eps = 1e-20
-    vv = np.nan_to_num(vv_lin, nan=0.0, posinf=0.0, neginf=0.0)
-    vh = np.nan_to_num(vh_lin, nan=0.0, posinf=0.0, neginf=0.0)
-    vv = np.maximum(vv, 0.0)
-    vh = np.maximum(vh, 0.0)
+    valid = np.isfinite(vv_lin) & np.isfinite(vh_lin)
+    vv = np.where(valid, np.maximum(vv_lin, 0.0), 0.0)
+    vh = np.where(valid, np.maximum(vh_lin, 0.0), 0.0)
 
     if index_key == "RVI":
-        return (4.0 * vh / (vh + vv + eps)).astype(np.float32)
-    if index_key == "RFDI":
-        return ((vv - vh) / (vv + vh + eps)).astype(np.float32)
-    if index_key == "VV_VH":
-        return (vv / (vh + eps)).astype(np.float32)
-    if index_key == "VH_VV":
-        return (vh / (vv + eps)).astype(np.float32)
-    if index_key == "NRPB":
-        return ((vh - vv) / (vh + vv + eps)).astype(np.float32)
-    raise ValueError(f"Índice SAR desconocido: {index_key}")
+        out = 4.0 * vh / (vh + vv + eps)
+    elif index_key == "RFDI":
+        out = (vv - vh) / (vv + vh + eps)
+    elif index_key == "VV_VH":
+        out = vv / (vh + eps)
+    elif index_key == "VH_VV":
+        out = vh / (vv + eps)
+    elif index_key == "NRPB":
+        out = (vh - vv) / (vh + vv + eps)
+    else:
+        raise ValueError(f"Índice SAR desconocido: {index_key}")
+    return np.where(valid, out, np.nan).astype(np.float32)
 
 
 def read_vv_vh_pair_aligned(vv_path: Path, vh_path: Path) -> tuple[np.ndarray, np.ndarray, dict]:
     """
     Lee VV y VH en dB; alinea VH a la rejilla de VV si hace falta (reproyección vecino).
     Retorna (vv_lin, vh_lin, profile) con profile listo para una banda float32.
+
+    Los ENVI de SNAP no declaran nodata y el fondo fuera del footprint queda en
+    exactamente 0.0 dB en ambas polarizaciones; esos píxeles se devuelven como NaN
+    para que índices y clustering no traten el fondo como una clase más.
     """
     with rasterio.open(vv_path) as src_vv, rasterio.open(vh_path) as src_vh:
         vv_db = src_vv.read(1).astype(np.float64)
@@ -157,6 +166,13 @@ def read_vv_vh_pair_aligned(vv_path: Path, vh_path: Path) -> tuple[np.ndarray, n
             dst_crs=crs,
             resampling=Resampling.nearest,
         )
+
+    # Fondo SNAP: 0.0 dB exacto en VV y VH a la vez (sigma0 real nunca es 0.0 dB
+    # simultáneo en ambas polarizaciones sobre el footprint).
+    background = (vv_db == 0.0) & (vh_use == 0.0)
+    if np.any(background):
+        vv_db = np.where(background, np.nan, vv_db)
+        vh_use = np.where(background, np.nan, vh_use)
 
     vv_lin = _db_to_linear(vv_db)
     vh_lin = _db_to_linear(vh_use)

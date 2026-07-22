@@ -17,6 +17,15 @@ function normIndexKey(k) {
   return String(k || "").toUpperCase();
 }
 
+function labelIndexOption(key) {
+  const k = String(key || "");
+  if (k === "VV") return "solo VV";
+  if (k === "VH") return "solo VH";
+  if (k === "VV_VH") return "VV/VH";
+  if (k === "VH_VV") return "VH/VV";
+  return k;
+}
+
 function formatDate(iso) {
   if (!iso) return "—";
   const m = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})/);
@@ -54,7 +63,7 @@ export default function SensorTimelapseViewer({
   onClearRoi,
   roiSelection = null,
   clusterPreviewB64 = null,
-  clusterVisible = true,
+  clusterVisible = false,
   onToggleClusterVisible,
   clusterOptions = [],
   selectedClusterKey = "",
@@ -184,7 +193,7 @@ export default function SensorTimelapseViewer({
     if (!anyGrouped) {
       return list.map((k) => (
         <option key={k} value={k}>
-          {k}
+          {labelIndexOption(k)}
         </option>
       ));
     }
@@ -206,7 +215,7 @@ export default function SensorTimelapseViewer({
           {keysInGroup.length > 0 ? (
             keysInGroup.map((k) => (
               <option key={k} value={k}>
-                {k}
+                {labelIndexOption(k)}
               </option>
             ))
           ) : (
@@ -224,7 +233,7 @@ export default function SensorTimelapseViewer({
         <optgroup key="otros" label="Otros">
           {rest.map((k) => (
             <option key={k} value={k}>
-              {k}
+              {labelIndexOption(k)}
             </option>
           ))}
         </optgroup>

@@ -56,6 +56,9 @@ services:
       - ./backend:/app
       - ./data:/data
       - ${EXTERNAL_DATA_HOST_PATH:-/mnt/disco3tb/Data_Bioagro}:/data_bioagro:rw
+      # Export Markdown de la landing (scripts/generate_landing_markdown.py lee interpretations.js)
+      - ./scripts:/repo/scripts:ro
+      - ./frontend/src/landing:/repo/frontend/src/landing:ro
     # watchfiles: el worker recarga al cambiar .py (uvicorn sí recarga; Celery no, sin esto seguiría el código viejo).
     # --concurrency=1: un solo proceso pesado (Sentinel-2) evita OOM / SIGKILL 9; --max-tasks-per-child libera RAM tras cada tarea.
     command: bash -lc "apt-get update && apt-get install -y libexpat1 && pip install -r requirements.txt && watchfiles --filter python 'celery -A app.tasks.celery_app.celery_app worker --loglevel=info --concurrency=1 --max-tasks-per-child=2' ."

@@ -17,7 +17,12 @@ import LandingCollapsibleBlock from "./components/LandingCollapsibleBlock";
 import LandingTableOfContents from "./components/LandingTableOfContents";
 import LandingSensorBlock from "./sections/LandingSensorBlock";
 import { LANDING_SENSOR_BLOCKS } from "./sensorBlockConfig";
-import { blockAnchor, buildLandingToc, sensorKeyFromAnchor } from "./landingNavConfig";
+import {
+  blockAnchor,
+  buildLandingToc,
+  narrativeBlockTitle,
+  sensorKeyFromAnchor,
+} from "./landingNavConfig";
 import { shouldHideIaForClient } from "./landingSectionKeys";
 import {
   buildRecorteRgbEndpoint,
@@ -262,51 +267,6 @@ export default function ClientLandingPage({ mode: modeProp }) {
           </button>
         </div>
 
-        {isAdminRoute && isAdminUser ? (
-          <div className="landing-admin-banner" role="region" aria-label="Controles de edición narrativa">
-            <div className="landing-admin-banner-main">
-              <strong>{editMode ? "Edición admin — borradores" : "Vista previa como cliente (textos publicados)"}</strong>
-              <span className="landing-admin-banner-hint">
-                {narrative.hasUnpublishedDrafts
-                  ? "Hay cambios de borrador sin publicar."
-                  : "Borrador y publicado coinciden (o no hay textos)."}
-              </span>
-              {narrative.saveMsg ? <span className="landing-admin-banner-ok">{narrative.saveMsg}</span> : null}
-              {narrative.error ? <span className="landing-admin-banner-err">{narrative.error}</span> : null}
-            </div>
-            <div className="landing-admin-banner-actions">
-              <button
-                type="button"
-                className="landing-admin-btn"
-                disabled={narrative.saving}
-                onClick={() => setAdminViewAsClient((v) => !v)}
-              >
-                {adminViewAsClient ? "Volver a editar" : "Ver como cliente"}
-              </button>
-              {editMode ? (
-                <>
-                  <button
-                    type="button"
-                    className="landing-admin-btn landing-admin-btn--primary"
-                    disabled={narrative.saving}
-                    onClick={() => void narrative.saveDrafts()}
-                  >
-                    {narrative.saving ? "Guardando…" : "Guardar borradores"}
-                  </button>
-                  <button
-                    type="button"
-                    className="landing-admin-btn landing-admin-btn--publish"
-                    disabled={narrative.saving}
-                    onClick={() => void narrative.publishDrafts()}
-                  >
-                    Publicar narrativa
-                  </button>
-                </>
-              ) : null}
-            </div>
-          </div>
-        ) : null}
-
         <LandingHero meta={landingMeta} heroImageSrc={heroSrc} kpis={kpis} />
 
         {(loading || error) && (
@@ -318,19 +278,76 @@ export default function ClientLandingPage({ mode: modeProp }) {
 
         {!loading && adapted ? (
           <div className={`landing-body-layout${tocExpanded ? "" : " landing-body-layout--toc-collapsed"}`}>
-            <LandingTableOfContents
-              toc={landingToc}
-              onNavigate={handleTocNavigate}
-              expanded={tocExpanded}
-              onExpandedChange={setTocExpanded}
-            />
+            <div className="landing-sidebar-col">
+              <LandingTableOfContents
+                toc={landingToc}
+                onNavigate={handleTocNavigate}
+                expanded={tocExpanded}
+                onExpandedChange={setTocExpanded}
+              />
+              {isAdminRoute && isAdminUser && tocExpanded ? (
+                <div
+                  className="landing-admin-side-panel"
+                  role="region"
+                  aria-label="Controles de edición narrativa"
+                >
+                  <strong className="landing-admin-side-title">
+                    {editMode ? "Edición admin — borradores" : "Vista previa como cliente"}
+                  </strong>
+                  <span className="landing-admin-banner-hint">
+                    {narrative.hasUnpublishedDrafts
+                      ? "Hay cambios de borrador sin publicar."
+                      : "Borrador y publicado coinciden (o no hay textos)."}
+                  </span>
+                  {narrative.saveMsg ? (
+                    <span className="landing-admin-banner-ok">{narrative.saveMsg}</span>
+                  ) : null}
+                  {narrative.error ? (
+                    <span className="landing-admin-banner-err">{narrative.error}</span>
+                  ) : null}
+                  <div className="landing-admin-side-actions">
+                    <button
+                      type="button"
+                      className="landing-admin-btn"
+                      disabled={narrative.saving}
+                      onClick={() => setAdminViewAsClient((v) => !v)}
+                    >
+                      {adminViewAsClient ? "Volver a editar" : "Ver como cliente"}
+                    </button>
+                    {editMode ? (
+                      <>
+                        <button
+                          type="button"
+                          className="landing-admin-btn landing-admin-btn--primary"
+                          disabled={narrative.saving}
+                          onClick={() => void narrative.saveDrafts()}
+                        >
+                          {narrative.saving ? "Guardando…" : "Guardar borradores"}
+                        </button>
+                        <button
+                          type="button"
+                          className="landing-admin-btn landing-admin-btn--publish"
+                          disabled={narrative.saving}
+                          onClick={() => void narrative.publishDrafts()}
+                        >
+                          Publicar narrativa
+                        </button>
+                      </>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
+            </div>
             <main className="landing-main">
-              {LANDING_SENSOR_BLOCKS.map((block, idx) => (
+              {LANDING_SENSOR_BLOCKS.map((block, idx) => {
+                const narrTitle = narrativeBlockTitle(block.id);
+                return (
                 <LandingCollapsibleBlock
                   key={block.id}
                   anchorId={blockAnchor(block.id)}
                   blockNum={String(idx + 1)}
-                  title={landingToc[idx]?.title || block.title}
+                  title={narrTitle.plain}
+                  titleEmphasis={narrTitle.emphasis}
                   open={openBlocks[block.id]}
                   onOpenChange={(next) =>
                     setOpenBlocks((prev) => ({ ...prev, [block.id]: next }))
@@ -349,7 +366,8 @@ export default function ClientLandingPage({ mode: modeProp }) {
                     narrative={narrative}
                   />
                 </LandingCollapsibleBlock>
-              ))}
+                );
+              })}
             </main>
           </div>
         ) : null}

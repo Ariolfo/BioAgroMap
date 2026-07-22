@@ -2,6 +2,7 @@ import { useState } from "react";
 
 export default function LandingCollapsibleBlock({
   title,
+  titleEmphasis = null,
   blockNum,
   anchorId,
   defaultOpen = true,
@@ -33,7 +34,12 @@ export default function LandingCollapsibleBlock({
         </button>
         <div className="landing-sensor-block-title-wrap">
           {blockNum ? <span className="landing-block-num">{blockNum}</span> : null}
-          <h2 className="landing-sensor-block-title">{title}</h2>
+          <h2 className="landing-sensor-block-title">
+            {title}
+            {titleEmphasis ? (
+              <strong className="landing-sensor-block-title-emphasis">{titleEmphasis}</strong>
+            ) : null}
+          </h2>
         </div>
       </div>
       {open ? <div className="landing-sensor-block-body">{children}</div> : null}

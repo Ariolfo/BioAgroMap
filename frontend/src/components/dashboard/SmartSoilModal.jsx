@@ -453,12 +453,12 @@ export default function SmartSoilModal({ open, onClose, token, projectId, projec
           {soilPlusError ? <span className="adv-soilplus-badge adv-soilplus-badge--err">{soilPlusError}</span> : null}
         </div>
         <p className="adv-soilplus-dem-path">
-          Imagen de entrada: <code>{soilDemInfo?.input_image_path || `/home/deep/Documentos/BioAgroMap/data/storage/tenant_activo/project_${projectId || "?"}/dem/band_1.img`}</code>
+          Imagen de entrada: <code>{soilDemInfo?.input_image_path || `/home/deep/Documentos/BioAgroMap/data/storage/tenant_activo/project_${projectId || "?"}/dem/band_1.tif`}</code>
         </p>
         <div className="adv-dashboard-soil-body">
           <div className="adv-soilplus-top-row">
             <section className="adv-soilplus-card adv-soilplus-card--dem-top">
-              <h4>DEM de entrada (band_1.img)</h4>
+              <h4>DEM de entrada (band_1.img / .tif)</h4>
               <p className="adv-soilplus-dem-meta">
                 Dibuja un polígono ROI opcional; el CV solo se muestra y estadifica dentro de él.
                 {soilVars.f1 != null

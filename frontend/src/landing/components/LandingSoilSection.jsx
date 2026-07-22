@@ -71,7 +71,8 @@ export default function LandingSoilSection({
       {hasData ? (
         <div className="landing-soil-mosaic-wrap">
           <p className="landing-soil-mosaic-caption">
-            Mosaico 2×2 ({preferredVariant === "matlab" ? "Mat" : "Fast"}): DEM válido · DEM altura · CV · Clusters
+            Mosaico 2×2 ({preferredVariant === "matlab" ? "Mat" : "Fast"}): DEM válido · DEM
+            altura · CV · Clusters con puntos de muestreo
           </p>
           <img
             className="landing-soil-mosaic-img"

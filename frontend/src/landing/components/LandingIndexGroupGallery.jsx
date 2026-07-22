@@ -58,6 +58,9 @@ export default function LandingIndexGroupGallery({
             onDraftChange={(v) => narrative?.setDraft?.(activeKey, v)}
             displayBody={activeDisplayBody}
             disabled={narrative?.saving}
+            allowImages={Boolean(editMode)}
+            projectId={projectId}
+            token={token}
             label={`Narrativa de ${String(activeIndexKey).toUpperCase()} (Markdown)`}
           />
         </aside>

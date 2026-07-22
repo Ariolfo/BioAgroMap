@@ -60,16 +60,89 @@ export function buildRecorteRgbEndpoint(projectId, relativePath, pipelineVariant
   )}&pipeline_variant=${encodeURIComponent(pipelineVariant)}`;
 }
 
-export function buildS1Sigma0PreviewEndpoint(projectId, relativePath) {
+/** Claves pseudo-índice para stacks sigma0 en la vista interactiva S1. */
+export const S1_SIGMA_VISUAL_VV = "VV";
+export const S1_SIGMA_VISUAL_VH = "VH";
+
+/** Orden preferido del selector S1: 5 índices SAR + solo VV + solo VH. */
+export const S1_INTERACTIVE_INDEX_ORDER = [
+  "RVI",
+  "RFDI",
+  "VV_VH",
+  "VH_VV",
+  "NRPB",
+  S1_SIGMA_VISUAL_VV,
+  S1_SIGMA_VISUAL_VH,
+];
+
+export function isS1SigmaVisualKey(key) {
+  const k = String(key || "").toUpperCase();
+  return k === S1_SIGMA_VISUAL_VV || k === S1_SIGMA_VISUAL_VH;
+}
+
+/** Etiqueta del selector (índices SAR + polarizaciones). */
+export function labelInteractiveIndexOption(key) {
+  const k = String(key || "");
+  if (k === S1_SIGMA_VISUAL_VV || k.toUpperCase() === "VV") return "solo VV";
+  if (k === S1_SIGMA_VISUAL_VH || k.toUpperCase() === "VH") return "solo VH";
+  if (k === "VV_VH") return "VV/VH";
+  if (k === "VH_VV") return "VH/VV";
+  return k;
+}
+
+export function buildS1Sigma0PreviewEndpoint(projectId, relativePath, pol = "vv") {
   const base = API_URL.replace(/\/$/, "");
+  const p = String(pol || "vv").trim().toLowerCase() === "vh" ? "vh" : "vv";
   return `${base}/preprocess/s1-preproceso-sigma0-vv-preview/${projectId}?path=${encodeURIComponent(
     relativePath
-  )}&pol=vv&palette=spectral`;
+  )}&pol=${encodeURIComponent(p)}&palette=spectral`;
+}
+
+/**
+ * Frames temporales desde inventario de Sigma0_VV/VH_db.img (una escena = un archivo).
+ * @param {"vv"|"vh"} pol
+ */
+export function buildS1SigmaVisualFrames(items, pol) {
+  const p = String(pol || "vv").trim().toLowerCase() === "vh" ? "vh" : "vv";
+  const key = p === "vh" ? S1_SIGMA_VISUAL_VH : S1_SIGMA_VISUAL_VV;
+  const frames = [];
+  for (let i = 0; i < (items || []).length; i += 1) {
+    const row = items[i];
+    const date = normIso(row.sort_key);
+    if (!date || !row.relative_path) continue;
+    frames.push({
+      id: `s1:${key}:1:${row.relative_path}`,
+      date,
+      band: 1,
+      relativePath: row.relative_path,
+      kind: "s1-sigma",
+      pol: p,
+    });
+  }
+  frames.sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  return frames;
+}
+
+/** Une índices SAR con opciones solo VV / solo VH y ordena el selector. */
+export function mergeS1InteractiveVisuals(s1Block, s1PrepVv = [], s1PrepVh = []) {
+  const framesByIndex = { ...(s1Block?.framesByIndex || {}) };
+  const vvFrames = buildS1SigmaVisualFrames(s1PrepVv, "vv");
+  const vhFrames = buildS1SigmaVisualFrames(s1PrepVh, "vh");
+  if (vvFrames.length) framesByIndex[S1_SIGMA_VISUAL_VV] = vvFrames;
+  if (vhFrames.length) framesByIndex[S1_SIGMA_VISUAL_VH] = vhFrames;
+
+  const present = new Set(Object.keys(framesByIndex));
+  const preferred = S1_INTERACTIVE_INDEX_ORDER.filter((k) => present.has(k));
+  const rest = [...present].filter((k) => !S1_INTERACTIVE_INDEX_ORDER.includes(k)).sort();
+  return { indices: [...preferred, ...rest], framesByIndex };
 }
 
 export function buildIndexPreviewEndpoint(sensor, projectId, frame) {
   const base = API_URL.replace(/\/$/, "");
   if (sensor === "s1") {
+    if (frame?.kind === "s1-sigma") {
+      return buildS1Sigma0PreviewEndpoint(projectId, frame.relativePath, frame.pol);
+    }
     return `${base}/preprocess/s1-sar-index-stacks-preview/${projectId}?path=${encodeURIComponent(
       frame.relativePath
     )}&band=${frame.band}&index_palette=1`;

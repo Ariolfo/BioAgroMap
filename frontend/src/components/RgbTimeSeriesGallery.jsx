@@ -433,6 +433,7 @@ const GALLERY_INDEX_KEYS = ["NDVI", "EVI", "NDWI", "CIre", "MCARI"];
 /** PlanetScope ``indecesPS/`` (mismo orden que catálogo estimación). */
 const GALLERY_INDEX_KEYS_PS = [
   "NDVI",
+  "EVI",
   "NDWI",
   "MSAVI2",
   "MTVI2",
@@ -673,7 +674,7 @@ export default function RgbTimeSeriesGallery({
       setActiveIndexKey("NDVI");
       return;
     }
-    if (initialIndexKey && allowedIndexKeys?.length) {
+    if (initialIndexKey && allowedKeysSig) {
       const match = indexGalleryKeys.find(
         (k) => String(k).toUpperCase() === String(initialIndexKey).toUpperCase()
       );
@@ -684,7 +685,10 @@ export default function RgbTimeSeriesGallery({
     }
     if (galleryVisualMode === "s1-sar-index") setActiveIndexKey(indexGalleryKeys[0] || "RVI");
     else if (galleryVisualMode === "index") setActiveIndexKey(indexGalleryKeys[0] || "NDVI");
-  }, [open, embedded, galleryVisualMode, initialIndexKey, allowedIndexKeys, indexGalleryKeys]);
+    // ``allowedIndexKeys`` (array) cambia de identidad en cada render del padre (p. ej. al
+    // teclear en la narrativa) y reseteaba la pestaña activa al índice inicial; usar la
+    // firma estable ``allowedKeysSig`` evita ese reinicio.
+  }, [open, embedded, galleryVisualMode, initialIndexKey, allowedKeysSig, indexGalleryKeys]);
 
   useEffect(() => {
     if (typeof onActiveIndexChange === "function") {

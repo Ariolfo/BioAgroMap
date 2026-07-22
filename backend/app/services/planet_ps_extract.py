@@ -1,4 +1,4 @@
-"""Extracción de ``composite.tif`` y metadatos XML desde zips PlanetScope en ``rasterPS/`` hacia ``recortesPS/``."""
+"""Extracción de imágenes composite/PSScene desde zips PlanetScope hacia ``recortesPS/``."""
 
 from __future__ import annotations
 
@@ -16,8 +16,15 @@ _YMD_PREFIX = re.compile(r"^(\d{4})(\d{2})(\d{2})_")
 
 
 def _find_composite_in_zip(names: list[str]) -> str | None:
-    """``composite.tif`` estándar o ``*composite.tif`` (Planet strip / PSScene), excl. ``*udm2*``."""
+    """
+    Localiza la imagen analítica principal del paquete PlanetScope.
+
+    Prioriza ``composite.tif`` (órdenes/mosaicos) y, si no existe, acepta el
+    producto SR de una escena PSScene: ``*_AnalyticMS_SR_8b_clip.tif``.
+    Nunca selecciona la máscara UDM2.
+    """
     loose: list[str] = []
+    ps_scene_sr: list[str] = []
     for n in names:
         n = n.replace("\\", "/")
         low = posixpath.basename(n).lower()
@@ -25,11 +32,16 @@ def _find_composite_in_zip(names: list[str]) -> str | None:
             return n
         if low.endswith("composite.tif") and "udm2" not in low:
             loose.append(n)
-    if not loose:
-        return None
-    if len(loose) == 1:
-        return loose[0]
-    return max(loose, key=lambda p: (len(posixpath.basename(p)), p))
+        if low.endswith("_analyticms_sr_8b_clip.tif") and "udm2" not in low:
+            ps_scene_sr.append(n)
+    if loose:
+        if len(loose) == 1:
+            return loose[0]
+        return max(loose, key=lambda p: (len(posixpath.basename(p)), p))
+    if ps_scene_sr:
+        # Normalmente hay uno; orden estable si el paquete contiene más de una escena.
+        return sorted(ps_scene_sr)[0]
+    return None
 
 
 def _same_dir_sidecars(names: list[str], composite_inner: str) -> list[str]:
@@ -85,8 +97,13 @@ def extract_planet_zips_from_raster_ps(
     recortes_ps_root: Path,
 ) -> dict:
     """
-    Por cada ``*.zip`` en ``raster_ps_root``: localiza ``composite.tif`` y XML en el mismo directorio interno,
-    extrae a ``recortes_ps_root`` renombrando el composite a ``PS_dd-mm-yy.tif`` según prefijo YYYYMMDD_ de un XML.
+    Por cada ``*.zip`` en ``raster_ps_root``: localiza ``composite.tif`` o un
+    ``*_AnalyticMS_SR_8b_clip.tif`` de PSScene y los metadatos en su mismo
+    directorio interno. Extrae la imagen a ``recortes_ps_root`` como
+    ``PS_dd-mm-yy.tif`` según el prefijo YYYYMMDD_ de sus metadatos.
+
+    Idempotente: re-ejecutar reemplaza las salidas de la misma fecha (incluidos
+    sidecars y duplicados ``_N`` de corridas anteriores) en vez de acumularlas.
     """
     raster_ps_root = raster_ps_root.resolve()
     recortes_ps_root = recortes_ps_root.resolve()
@@ -94,6 +111,7 @@ def extract_planet_zips_from_raster_ps(
 
     results: list[dict] = []
     errors: list[str] = []
+    dates_written_this_run: set[str] = set()
 
     zips = sorted(raster_ps_root.glob("*.zip"))
     if not zips:
@@ -112,7 +130,10 @@ def extract_planet_zips_from_raster_ps(
                 names = zf.namelist()
                 comp = _find_composite_in_zip(names)
                 if not comp:
-                    errors.append(f"{zp.name}: no se encontró composite.tif dentro del zip")
+                    errors.append(
+                        f"{zp.name}: no se encontró composite.tif ni "
+                        "*_AnalyticMS_SR_8b_clip.tif dentro del zip"
+                    )
                     continue
                 sidecars = _same_dir_sidecars(names, comp)
                 ymd = _yyyymmdd_from_basenames(sidecars)
@@ -121,7 +142,17 @@ def extract_planet_zips_from_raster_ps(
                         f"{zp.name}: no se pudo obtener fecha YYYYMMDD_ desde nombres en la carpeta del composite (XML/JSON)"
                     )
                     continue
-                dest_tif = _unique_path(recortes_ps_root / _dest_tif_name(ymd))
+                base_dest = recortes_ps_root / _dest_tif_name(ymd)
+                if ymd in dates_written_this_run:
+                    # Dos zips con la misma fecha en la misma corrida: no pisarse entre sí.
+                    dest_tif = _unique_path(base_dest)
+                else:
+                    # Limpia la salida previa de esta fecha (composite, sidecars y duplicados _N).
+                    for stale in recortes_ps_root.glob(f"{base_dest.stem}*"):
+                        if stale.is_file():
+                            stale.unlink(missing_ok=True)
+                    dest_tif = base_dest
+                dates_written_this_run.add(ymd)
 
                 with tempfile.TemporaryDirectory(prefix="ps_zip_") as tmp:
                     td = Path(tmp)
@@ -140,7 +171,7 @@ def extract_planet_zips_from_raster_ps(
                         if not src_sc.is_file():
                             continue
                         sc_base = posixpath.basename(sc_inner)
-                        dest_sc = _unique_path(recortes_ps_root / f"{dest_tif.stem}_{sc_base}")
+                        dest_sc = recortes_ps_root / f"{dest_tif.stem}_{sc_base}"
                         shutil.copy2(src_sc, dest_sc)
 
                 results.append(

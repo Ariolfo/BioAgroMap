@@ -10,7 +10,15 @@ export default defineConfig({
   server: {
     host: "0.0.0.0",
     port: 5173,
-    allowedHosts: ['campbell-monitoring-perhaps-thoughts.trycloudflare.com'],// Volúmen ./frontend:/app: asegura HMR cuando el host no propaga inotify al contenedor.,
+    // Túneles públicos (ngrok / cloudflare). Sin esto Vite bloquea el Host header.
+    allowedHosts: [
+      ".ngrok-free.app",
+      ".ngrok-free.dev",
+      ".ngrok.app",
+      ".ngrok.io",
+      ".trycloudflare.com",
+    ],
+    // Volúmen ./frontend:/app: asegura HMR cuando el host no propaga inotify al contenedor.
     watch: {
       usePolling: true,
       interval: 800,

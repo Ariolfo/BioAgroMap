@@ -64,6 +64,26 @@ export default function useLandingTexts(projectId, token, view = "published") {
     setSaveMsg("");
   }, []);
 
+  /** Rellena un borrador vacío con texto por defecto sin marcar como “cambios sin publicar”. */
+  const seedDraftIfEmpty = useCallback((sectionKey, value) => {
+    const text = String(value || "");
+    if (!text.trim()) return false;
+    let seeded = false;
+    setByKey((prev) => {
+      const current = String(prev[sectionKey]?.draft_body || "").trim();
+      if (current) return prev;
+      seeded = true;
+      return {
+        ...prev,
+        [sectionKey]: {
+          ...(prev[sectionKey] || { published_body: "" }),
+          draft_body: text,
+        },
+      };
+    });
+    return seeded;
+  }, []);
+
   const saveDrafts = useCallback(async () => {
     if (!projectId || !token) return false;
     setSaving(true);
@@ -153,6 +173,7 @@ export default function useLandingTexts(projectId, token, view = "published") {
     saveMsg,
     load,
     setDraft,
+    seedDraftIfEmpty,
     saveDrafts,
     publishDrafts,
     bodyForDisplay,

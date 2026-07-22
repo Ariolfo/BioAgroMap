@@ -1,4 +1,9 @@
-import { SENSOR_META, buildSensorInventory, normIso } from "./previewUtils";
+import {
+  SENSOR_META,
+  buildSensorInventory,
+  mergeS1InteractiveVisuals,
+  normIso,
+} from "./previewUtils";
 
 export function normalizeProjectSlug(name) {
   return String(name || "")
@@ -34,9 +39,11 @@ export function adaptInventories({
   s2Recortes = [],
   psRecortes = [],
   s1PrepVv = [],
+  s1PrepVh = [],
 }) {
+  const s1Base = buildSensorInventory(s1Items, "s1");
   const sensorData = {
-    s1: buildSensorInventory(s1Items, "s1"),
+    s1: mergeS1InteractiveVisuals(s1Base, s1PrepVv, s1PrepVh),
     s2: buildSensorInventory(s2Items, "s2"),
     ps: buildSensorInventory(psItems, "ps"),
   };
@@ -44,6 +51,7 @@ export function adaptInventories({
     sensorData,
     recorteInventory: { s2: s2Recortes, ps: psRecortes },
     s1PrepSigmaItems: s1PrepVv,
+    s1PrepSigmaItemsVh: s1PrepVh,
   };
 }
 

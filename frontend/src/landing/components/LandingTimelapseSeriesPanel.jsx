@@ -11,6 +11,7 @@ import {
   buildS1Sigma0PreviewEndpoint,
   fetchPreviewDataUrl,
   findRecortePathForSceneDate,
+  isS1SigmaVisualKey,
   resolveInventoryIndexKey,
 } from "../previewUtils";
 
@@ -106,12 +107,28 @@ export default function LandingTimelapseSeriesPanel({
   const loadIndexForFrame = useCallback(
     async (frame) => {
       if (!projectId || !frame) return "";
-      const key = `${projectId}|idx|${sensorKey}|${frame.id}`;
-      return getCachedPreview(key, () =>
-        fetchPreviewDataUrl(buildIndexPreviewEndpoint(sensorKey, projectId, frame), token)
+      const pol =
+        frame.kind === "s1-sigma"
+          ? frame.pol
+          : isS1SigmaVisualKey(selectedIndex)
+            ? String(selectedIndex).toUpperCase() === "VH"
+              ? "vh"
+              : "vv"
+            : null;
+      const cacheKey =
+        pol != null
+          ? `${projectId}|s1sigma|${pol}|${frame.relativePath}`
+          : `${projectId}|idx|${sensorKey}|${frame.id}`;
+      return getCachedPreview(cacheKey, () =>
+        fetchPreviewDataUrl(
+          pol != null
+            ? buildS1Sigma0PreviewEndpoint(projectId, frame.relativePath, pol)
+            : buildIndexPreviewEndpoint(sensorKey, projectId, frame),
+          token
+        )
       );
     },
-    [projectId, sensorKey, getCachedPreview, token]
+    [projectId, sensorKey, selectedIndex, getCachedPreview, token]
   );
 
   useEffect(() => {
@@ -250,7 +267,7 @@ export default function LandingTimelapseSeriesPanel({
               {!seriesLoading && seriesData ? (
                 <VegetationTimeSeriesCharts
                   data={seriesData}
-                  onlyIndexKey={selectedIndex}
+                  onlyIndexKey={isS1SigmaVisualKey(selectedIndex) ? null : selectedIndex}
                   activeSceneDate={currentFrame?.date || null}
                   chartPixelHeight={230}
                   chartHeadingOverride="SERIE TEMPORAL DE INDICES"

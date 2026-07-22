@@ -61,6 +61,33 @@ const BLOCK_TITLES = {
   s2: "Sentinel 2",
 };
 
+/** Subtítulo de la tarjeta 2.1 / vista interactiva según sensor. */
+export function interactiveSectionSubtitle(sensorKey) {
+  if (sensorKey === "s1") {
+    return (
+      "El análisis de la agricultura con radar (especialmente tecnología SAR - Radar de Apertura Sintética) " +
+      "utiliza microondas activas para medir la estructura física, biomasa y humedad del suelo y las plantas. " +
+      "A diferencia de las imágenes ópticas, los datos de radar penetran la nubosidad, la lluvia y la oscuridad, " +
+      "operando eficazmente las 24 horas. Algo importante en países ubicados en el trópico, como Colombia."
+    );
+  }
+  return "Compare índice y RGB, explore el timelapse y las series de clima.";
+}
+
+/**
+ * Título del bloque en la vista narrativa (no TOC).
+ * Para S1 añade la etiqueta Radar/SAR y el eslogan en negrita.
+ */
+export function narrativeBlockTitle(sensorKey) {
+  if (sensorKey === "s1") {
+    return {
+      plain: "Sentinel 1 - Radar (SAR - Radar de Apertura Sintética)",
+      emphasis: "OBSERVANDO TU FINCA A TRAVÉS DE LAS NUBES",
+    };
+  }
+  return { plain: BLOCK_TITLES[sensorKey] || sensorKey, emphasis: null };
+}
+
 /** Entradas de tabla de contenidos para los tres bloques sensor. */
 export function buildLandingToc() {
   return LANDING_SENSOR_BLOCKS.map((block, blockIdx) => {

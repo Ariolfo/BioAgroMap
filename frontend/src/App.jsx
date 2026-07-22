@@ -20,6 +20,7 @@ import MapView from "./components/MapView";
 import AdvancedDashboard from "./components/dashboard/AdvancedDashboard";
 import SmartClusterModal from "./components/dashboard/SmartClusterModal";
 import SmartSoilModal from "./components/dashboard/SmartSoilModal";
+import MarkdownReportsModal from "./components/dashboard/MarkdownReportsModal";
 import UserManagementModal from "./components/UserManagementModal";
 import StudyRequestModal from "./components/StudyRequestModal";
 import AdminStudyOrdersModal from "./components/AdminStudyOrdersModal";
@@ -94,6 +95,7 @@ export default function App() {
   const [dashboardOpen, setDashboardOpen] = useState(false);
   const [smartClusterOpen, setSmartClusterOpen] = useState(false);
   const [smartSoilOpen, setSmartSoilOpen] = useState(false);
+  const [markdownReportsOpen, setMarkdownReportsOpen] = useState(false);
   const [userMgmtOpen, setUserMgmtOpen] = useState(false);
   const [authStep, setAuthStep] = useState("email");
   const [pendingRegEmail, setPendingRegEmail] = useState("");
@@ -1599,6 +1601,13 @@ export default function App() {
           }
           setSmartSoilOpen(true);
         }}
+        onOpenMarkdownReports={() => {
+          if (!isAdmin) {
+            setMessage("Acceso restringido: Smart solo para admin.");
+            return;
+          }
+          setMarkdownReportsOpen(true);
+        }}
         onOpenUserManagement={() => {
           if (!isAdmin) {
             setMessage("Acceso restringido: Gestion de usuarios solo para admin.");
@@ -1703,6 +1712,13 @@ export default function App() {
       <SmartSoilModal
         open={smartSoilOpen && !!token && !!projectId && isAdmin}
         onClose={() => setSmartSoilOpen(false)}
+        token={token}
+        projectId={projectId}
+        projectName={dashboardProjectName}
+      />
+      <MarkdownReportsModal
+        open={markdownReportsOpen && !!token && !!projectId && isAdmin}
+        onClose={() => setMarkdownReportsOpen(false)}
         token={token}
         projectId={projectId}
         projectName={dashboardProjectName}

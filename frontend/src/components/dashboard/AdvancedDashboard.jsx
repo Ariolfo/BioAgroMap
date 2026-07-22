@@ -365,7 +365,7 @@ export default function AdvancedDashboard({
   const [recorteInventory, setRecorteInventory] = useState({ s2: [], ps: [] });
   const [s1PrepSigmaItems, setS1PrepSigmaItems] = useState([]);
   const [clusterBySensor, setClusterBySensor] = useState({ s1: [], s2: [], ps: [] });
-  const [clusterVisible, setClusterVisible] = useState(true);
+  const [clusterVisible, setClusterVisible] = useState(false);
   const [selectedClusterKey, setSelectedClusterKey] = useState({ s1: "", s2: "", ps: "" });
   const [pointSelection, setPointSelection] = useState(null);
   const [roiSelection, setRoiSelection] = useState(null);
@@ -1767,13 +1767,13 @@ export default function AdvancedDashboard({
               Imagen de entrada:{" "}
               <code>
                 {soilDemInfo?.input_image_path ||
-                  `/home/deep/Documentos/BioAgroMap/data/storage/tenant_activo/project_${projectId || "?"}/dem/band_1.img`}
+                  `/home/deep/Documentos/BioAgroMap/data/storage/tenant_activo/project_${projectId || "?"}/dem/band_1.tif`}
               </code>
             </p>
             <div className="adv-soilplus-window-scroll">
               <div className="adv-soilplus-top-row">
                 <section className="adv-soilplus-card adv-soilplus-card--dem-top">
-                  <h4>DEM de entrada (band_1.img)</h4>
+                  <h4>DEM de entrada (band_1.img / .tif)</h4>
                   <p className="adv-soilplus-dem-meta">
                     {soilDemInfo
                       ? `windowSize: ${soilDemInfo.window_size} | Media DEM: ${Number(soilDemInfo.dem_mean || 0).toFixed(3)} | Std: ${Number(

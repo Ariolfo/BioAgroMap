@@ -253,7 +253,7 @@ export default function ClientSoilViewModal({
             <div className="adv-soilplus-window-scroll">
               <div className="adv-soilplus-top-row">
                 <section className="adv-soilplus-card adv-soilplus-card--dem-top">
-                  <h4>DEM de entrada (band_1.img)</h4>
+                  <h4>DEM de entrada (band_1.img / .tif)</h4>
                   <p className="adv-soilplus-dem-meta">
                     {`windowSize: ${ws} | Media DEM: ${Number(saved.dem_mean_snapshot || 0).toFixed(3)} | Std: — | Min: — | Max: — | CV mean: ${Number(
                       saved.cv_mean_snapshot || 0

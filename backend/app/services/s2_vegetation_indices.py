@@ -205,11 +205,23 @@ def compute_index_arrays(
     raise ValueError(f"Índice no soportado: {index_name}")
 
 
+def _read_band_nan_nodata(src: Any, band_index: int) -> np.ndarray:
+    """Lee una banda como float32 con los píxeles nodata (fondo del recorte) en NaN."""
+    arr = src.read(band_index, masked=True)
+    if isinstance(arr, np.ma.MaskedArray):
+        return arr.astype(np.float32).filled(np.nan)
+    return arr.astype(np.float32)
+
+
 def read_planet_eight_bands_bgri(tif_path: Path) -> tuple[dict[str, np.ndarray], dict]:
     """
     Lee bandas PS alineadas a la rejilla de la banda 2 (azul).
 
     Claves: ``b``, ``g``, ``r``, ``ir`` (PS2,4,6,8); ``green_i``, ``yellow`` (PS3, PS5); ``red_edge`` (PS7).
+
+    El fondo del recorte (nodata=0 en los composites Planet) se lee como NaN para
+    que índices aritméticos (MSAVI2, MTVI2, TGI, EVI, MCARI) no lo conviertan en
+    un valor finito y lo metan en estadísticas, cluster o ploteo.
     """
     with rasterio.open(tif_path) as src:
         if int(src.count) < PS_INDEX_MIN_BANDS:
@@ -219,11 +231,11 @@ def read_planet_eight_bands_bgri(tif_path: Path) -> tuple[dict[str, np.ndarray],
         ref_h, ref_w = src.height, src.width
         ref_transform = src.transform
         ref_crs = src.crs
-        ref_band = src.read(_PS_BGRI_BANDS_1BASED["b"]).astype(np.float32)
+        ref_band = _read_band_nan_nodata(src, _PS_BGRI_BANDS_1BASED["b"])
         out: dict[str, np.ndarray] = {}
         for key in ("b", "g", "r", "ir"):
             bi = _PS_BGRI_BANDS_1BASED[key]
-            arr = src.read(bi).astype(np.float32)
+            arr = _read_band_nan_nodata(src, bi)
             if arr.shape == ref_band.shape:
                 out[key] = arr
             else:
@@ -245,7 +257,7 @@ def read_planet_eight_bands_bgri(tif_path: Path) -> tuple[dict[str, np.ndarray],
                     ref_crs,
                 )
         for key, bi in (("green_i", 3), ("yellow", 5), ("red_edge", 7)):
-            arr = src.read(bi).astype(np.float32)
+            arr = _read_band_nan_nodata(src, bi)
             if arr.shape == ref_band.shape:
                 out[key] = arr
             else:

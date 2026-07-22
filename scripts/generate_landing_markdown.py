@@ -29,7 +29,11 @@ from app.services.raster_geo import render_raster_preview_png
 FRONTEND = REPO_ROOT / "frontend" / "src" / "landing"
 STORAGE_DEFAULT = REPO_ROOT / "data" / "storage"
 
-BLOCK_TITLES = {"ps": "Alta resolución", "s1": "Sentinel 1", "s2": "Sentinel 2"}
+BLOCK_TITLES = {
+    "ps": "Alta resolución",
+    "s1": "Sentinel 1 - Radar (SAR - Radar de Apertura Sintética) **OBSERVANDO TU FINCA A TRAVÉS DE LAS NUBES**",
+    "s2": "Sentinel 2",
+}
 SENSOR_ORDER = ["ps", "s1", "s2"]
 INDEX_DIRS = {"ps": "indecesPS", "s2": "indices", "s1": "s1indices"}
 CLUSTER_DIRS = {"ps": "ClusterPS", "s2": "cluster_gmm", "s1": "cluster_s1_gmm"}
@@ -46,12 +50,22 @@ CLUSTER_COLORS = [
 ]
 
 # Mosaicos legibles: cada miniatura se escala a TILE (aunque su raster nativo sea pequeño),
-# con pocas columnas para que cada imagen se vea grande dentro del mosaico.
-MOSAIC_TILE_MAX_DIM = 560
-MOSAIC_MAX_TILES_PER_PAGE = 9
-MOSAIC_COLUMNS = 3
-MARKDOWN_IMAGE_WIDTH = 1200
+# pocas columnas + tile grande para aprovechar el presupuesto ≤ 4.9 MB por .md.
+MOSAIC_TILE_MAX_DIM = 800
+MOSAIC_MAX_TILES_PER_PAGE = 8
+MOSAIC_COLUMNS = 2
+MARKDOWN_IMAGE_WIDTH = 1680
+MOSAIC_JPEG_QUALITY = 88
 
+INTERACTIVE_SUBTITLE_DEFAULT = (
+    "Compare índice y RGB, explore el timelapse y las series de clima."
+)
+INTERACTIVE_SUBTITLE_S1 = (
+    "El análisis de la agricultura con radar (especialmente tecnología SAR - Radar de Apertura Sintética) "
+    "utiliza microondas activas para medir la estructura física, biomasa y humedad del suelo y las plantas. "
+    "A diferencia de las imágenes ópticas, los datos de radar penetran la nubosidad, la lluvia y la oscuridad, "
+    "operando eficazmente las 24 horas. Algo importante en países ubicados en el trópico, como Colombia."
+)
 
 LANDING_INDEX_GROUPS = [
     {
@@ -85,7 +99,7 @@ LANDING_INDEX_GROUPS = [
 ]
 
 SUBSECTION_DEFS_BASE = [
-    ("interactive", "Vista interactiva temporal", "Compare índice y RGB, explore el timelapse y las series de clima."),
+    ("interactive", "Vista interactiva temporal", INTERACTIVE_SUBTITLE_DEFAULT),
     ("rgb", "Vista temporal visible", "Galería de escenas en color natural (RGB) a lo largo del tiempo."),
     ("indices", "Índices de vegetación", "Índices agrupados por función agronómica."),
     ("clusters", "Clusters generales", "Segmentación GMM por índice y multibanda."),
@@ -132,13 +146,62 @@ def load_index_farmer_copy() -> dict[str, dict]:
     return out
 
 
+# CIre es Sentinel-2 (B8/B5); no forma parte de PlanetScope.
+OPTICAL_KEYS_BY_SENSOR = {
+    "ps": {
+        "NDVI",
+        "EVI",
+        "NDWI",
+        "MSAVI2",
+        "MTVI2",
+        "VARI",
+        "TGI",
+        "KNDVI",
+        "GIYI",
+        "MCARI",
+        "NDRE",
+        "RSTRUCTURE",
+    },
+    "s2": {"NDVI", "EVI", "NDWI", "CIre", "MCARI"},
+}
+
+
 def index_keys_for_group(group_id: str, sensor_key: str) -> list[str]:
     g = next(x for x in LANDING_INDEX_GROUPS if x["id"] == group_id)
-    return g["keys_sar"] if sensor_key == "s1" else g["keys_optical"]
+    if sensor_key == "s1":
+        return list(g["keys_sar"])
+    allow = OPTICAL_KEYS_BY_SENSOR.get(sensor_key) or OPTICAL_KEYS_BY_SENSOR["s2"]
+    return [k for k in g["keys_optical"] if k in allow or k.upper() in {x.upper() for x in allow}]
 
 
 def subsection_defs(sensor_key: str) -> list[tuple[str, str, str]]:
     defs = list(SUBSECTION_DEFS_BASE)
+    if sensor_key == "s1":
+        defs = [
+            (
+                suffix,
+                title,
+                INTERACTIVE_SUBTITLE_S1 if suffix == "interactive" else subtitle,
+            )
+            for suffix, title, subtitle in defs
+        ]
+        # Alinea con la landing: RGB S1 describe polarizaciones VV/VH.
+        defs = [
+            (
+                suffix,
+                (
+                    "Vista temporal de datos de RADAR (Polarización VV y VH - sigma0 dB)"
+                    if suffix == "rgb"
+                    else title
+                ),
+                (
+                    "Galerías temporales de retrodispersión sigma0 (dB) en polarizaciones VV y VH."
+                    if suffix == "rgb"
+                    else subtitle
+                ),
+            )
+            for suffix, title, subtitle in defs
+        ]
     if sensor_key == "ps":
         defs = defs + list(SUBSECTION_DEFS_PS_EXTRA)
     return defs
@@ -297,6 +360,86 @@ def _data_uri(content: bytes, mime: str = "image/jpeg") -> str:
     return f"data:{mime};base64," + base64.b64encode(content).decode("ascii")
 
 
+MAX_MD_MB_DEFAULT = 4.9
+_DATA_URI_RE = re.compile(r"data:image/(?:png|jpeg);base64,([A-Za-z0-9+/=]+)")
+
+
+def _recompress_data_uri_b64(b64: str, *, quality: int, scale: float) -> str | None:
+    """Reencoda una imagen embebida a JPEG con menor calidad/tamaño. None si no reduce."""
+    try:
+        raw = base64.b64decode(b64)
+        img = Image.open(BytesIO(raw)).convert("RGB")
+    except Exception:
+        return None
+    if scale < 1.0:
+        w, h = img.size
+        img = img.resize(
+            (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+            Image.Resampling.LANCZOS,
+        )
+    buf = BytesIO()
+    img.save(buf, format="JPEG", quality=quality, optimize=True)
+    out = buf.getvalue()
+    if len(out) >= len(raw):
+        return None
+    return _data_uri(out, mime="image/jpeg")
+
+
+def enforce_markdown_size_limit(md: str, max_bytes: int, *, label: str = "") -> str:
+    """
+    Garantiza que el Markdown (con imágenes base64) no supere ``max_bytes``.
+    Prueba pasos de calidad/escala siempre sobre el original (sin degradar en cascada)
+    y elige el más suave que quepa, para aprovechar el presupuesto de 4.9 MB.
+    """
+    size = len(md.encode("utf-8"))
+    if size <= max_bytes:
+        return md
+
+    # Preferir calidad alta + resolución: el presupuesto de 4.9 MB se usa al máximo.
+    steps = [
+        (82, 1.0),
+        (74, 1.0),
+        (66, 1.0),
+        (58, 1.0),
+        (55, 0.92),
+        (52, 0.88),
+        (50, 0.85),
+        (48, 0.82),
+        (46, 0.80),
+        (44, 0.78),
+        (42, 0.75),
+        (40, 0.72),
+        (38, 0.68),
+        (35, 0.64),
+        (32, 0.58),
+        (28, 0.52),
+    ]
+    original = md
+    best = md
+    best_size = size
+    for quality, scale in steps:
+
+        def _repl(m: re.Match) -> str:
+            shrunk = _recompress_data_uri_b64(m.group(1), quality=quality, scale=scale)
+            return shrunk if shrunk is not None else m.group(0)
+
+        candidate = _DATA_URI_RE.sub(_repl, original)
+        csize = len(candidate.encode("utf-8"))
+        print(
+            f"Compresión {label or 'md'}: quality={quality} scale={scale} → {csize / (1024 * 1024):.2f} MB"
+        )
+        if csize <= max_bytes:
+            return candidate
+        if csize < best_size:
+            best, best_size = candidate, csize
+
+    print(
+        f"Aviso: {label or 'md'} sigue en {best_size / (1024 * 1024):.2f} MB tras compresión máxima "
+        f"(límite {max_bytes / (1024 * 1024):.2f} MB)."
+    )
+    return best
+
+
 def _emit_image(
     content: bytes,
     destination: Path,
@@ -379,11 +522,11 @@ def build_gallery_mosaic(
     tiles: list[tuple[Image.Image | None, str]],
     *,
     columns: int | None = None,
-    gap: int = 24,
-    caption_h: int = 40,
-    quality: int = 80,
+    gap: int = 28,
+    caption_h: int = 48,
+    quality: int = MOSAIC_JPEG_QUALITY,
 ) -> bytes:
-    """Mosaico tipo galería: rejilla legible (máx. 4 columnas) + etiqueta bajo cada miniatura."""
+    """Mosaico tipo galería: pocas columnas + tiles grandes + etiqueta bajo cada miniatura."""
     if not tiles:
         raise ValueError("No hay miniaturas para el mosaico")
 
@@ -399,7 +542,7 @@ def build_gallery_mosaic(
     n = len(fitted)
     cols = columns or min(MOSAIC_COLUMNS, max(1, n))
     rows = int(np.ceil(n / cols)) or 1
-    min_cell_for_caption = 220
+    min_cell_for_caption = 320
     cell_inner_w = max(max_w, min_cell_for_caption)
     cell_w = cell_inner_w + gap
     cell_h = max_h + caption_h + gap
@@ -410,10 +553,10 @@ def build_gallery_mosaic(
 
         draw = ImageDraw.Draw(canvas)
         try:
-            font = ImageFont.truetype("DejaVuSans-Bold.ttf", 16)
+            font = ImageFont.truetype("DejaVuSans-Bold.ttf", 22)
         except OSError:
             try:
-                font = ImageFont.truetype("DejaVuSans.ttf", 16)
+                font = ImageFont.truetype("DejaVuSans.ttf", 22)
             except OSError:
                 font = ImageFont.load_default()
     except Exception:
@@ -434,9 +577,9 @@ def build_gallery_mosaic(
             draw.rectangle([x0, y0, x0 + cell_inner_w, y0 + max_h], fill="#e8e8e8")
         if draw is not None:
             line = re.sub(r"\s+", " ", str(label or "—")).strip()
-            short = f"{line[:28]}…" if len(line) > 30 else line
+            short = f"{line[:36]}…" if len(line) > 38 else line
             tx = cell_x + cell_inner_w / 2
-            ty = y0 + max_h + 10
+            ty = y0 + max_h + 12
             draw.text((tx, ty), short, fill="#222222", font=font, anchor="mt")
 
     buffer = BytesIO()
@@ -454,7 +597,7 @@ def _store_mosaic_pages(
     columns: int | None = None,
     max_per_page: int = MOSAIC_MAX_TILES_PER_PAGE,
 ) -> list[dict]:
-    """Parte series largas en páginas legibles (p. ej. 12 miniaturas = 3×4)."""
+    """Parte series largas en páginas legibles (p. ej. 8 miniaturas = 4×2)."""
     if not tiles:
         return []
     pages: list[dict] = []
@@ -469,6 +612,70 @@ def _store_mosaic_pages(
         label = label_base if total_pages == 1 else f"{label_base} (parte {page_idx + 1}/{total_pages})"
         pages.append({"label": label, "path": ref})
     return pages
+
+
+def _soil_dem_height_image(source: Path, max_dim: int = MOSAIC_TILE_MAX_DIM) -> Image.Image:
+    """Renderiza el DEM MAT con paleta de alturas y barra en metros."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    with rasterio.open(source) as src:
+        arr = src.read(1).astype(np.float64)
+        nodata = src.nodata
+    valid = np.isfinite(arr)
+    if nodata is not None:
+        valid &= arr != nodata
+    if not np.any(valid):
+        raise ValueError(f"DEM sin píxeles válidos: {source}")
+
+    data = np.ma.array(arr, mask=~valid)
+    lo = float(np.nanmin(arr[valid]))
+    hi = float(np.nanmax(arr[valid]))
+    fig_w = max(6.4, max_dim / 100.0)
+    fig_h = max(5.2, (max_dim * 0.82) / 100.0)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=120)
+    im = ax.imshow(data, cmap="terrain", vmin=lo, vmax=hi, interpolation="nearest")
+    ax.set_axis_off()
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label("Altura (m)", fontsize=12)
+    cbar.ax.tick_params(labelsize=10)
+    fig.tight_layout(pad=0.2)
+    buf = BytesIO()
+    fig.savefig(buf, format="PNG", dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    return Image.open(buf).convert("RGB")
+
+
+def _soil_cluster_samples_image(source: Path, meta: dict) -> Image.Image:
+    """Amplía el cluster MAT y dibuja los puntos de muestreo en su posición."""
+    from PIL import ImageDraw
+
+    base = Image.open(source).convert("RGB")
+    source_w, source_h = base.size
+    target_dim = MOSAIC_TILE_MAX_DIM
+    scale = float(target_dim) / max(source_w, source_h, 1)
+    out_w = max(1, int(round(source_w * scale)))
+    out_h = max(1, int(round(source_h * scale)))
+    base = base.resize((out_w, out_h), Image.Resampling.NEAREST)
+
+    shape = meta.get("raster_shape") or {}
+    grid_w = max(1, int(shape.get("width") or source_w))
+    grid_h = max(1, int(shape.get("height") or source_h))
+    sx = out_w / grid_w
+    sy = out_h / grid_h
+    radius = max(6, int(round(min(sx, sy) * 0.32)))
+    draw = ImageDraw.Draw(base)
+    for point in meta.get("sample_points") or []:
+        try:
+            x = (float(point["col"]) + 0.5) * sx
+            y = (float(point["row"]) + 0.5) * sy
+        except (KeyError, TypeError, ValueError):
+            continue
+        triangle = [(x, y - radius), (x - radius, y + radius * 0.7), (x + radius, y + radius * 0.7)]
+        draw.polygon(triangle, fill="#fff176", outline="white", width=max(2, radius // 4))
+    return base
 
 
 def _centroid_from_project(project_root: Path, conn, project_id: int) -> tuple[float, float] | None:
@@ -604,7 +811,7 @@ def build_climate_series_for_dates(scene_dates: list[str], monthly: dict[str, di
     return rows
 
 
-def render_climate_chart_png(series: list[dict], *, width: int = 1200, height: int = 360) -> bytes:
+def render_climate_chart_png(series: list[dict], *, width: int = 1600, height: int = 480) -> bytes:
     """Gráfico dual-eje (precipitación + temperatura), como en la vista interactiva PS."""
     import matplotlib
 
@@ -653,7 +860,7 @@ def render_climate_chart_png(series: list[dict], *, width: int = 1200, height: i
 
     fig.tight_layout()
     buf = BytesIO()
-    fig.savefig(buf, format="PNG", dpi=140, bbox_inches="tight", facecolor="white")
+    fig.savefig(buf, format="PNG", dpi=160, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     return buf.getvalue()
 
@@ -841,27 +1048,82 @@ def export_landing_images(
         except Exception as exc:
             warnings.append(f"Mosaico smart clusters: {exc}")
 
+    # Agrogeofísica del Markdown: exclusivamente MAT y solo DEM altura, CV y cluster
+    # con los puntos de muestreo. No incluir Fast, aspect, slope, barras ni curva Q.
     dem_root = project_root / "dem"
-    soil_tiles: list[tuple[Image.Image | None, str]] = []
-    for source in sorted(dem_root.glob("soilplus_saved_*.png")) if dem_root.is_dir() else []:
-        label = source.stem.removeprefix("soilplus_saved_").replace("_", " — ")
+    mat_meta_path = dem_root / "soilplus_saved_matlab.json"
+    if mat_meta_path.is_file():
         try:
-            soil_tiles.append((Image.open(source).convert("RGB"), f"Soil Plus {label}"))
+            mat_meta = json.loads(mat_meta_path.read_text(encoding="utf-8"))
         except Exception as exc:
-            warnings.append(f"Soil Plus {label}: {exc}")
-            soil_tiles.append((None, f"Soil Plus {label}"))
-    if soil_tiles:
-        destination = assets_root / "ps" / "soil" / "soilplus_mosaic.jpg"
-        try:
-            exported["soil"] = _store_mosaic_pages(
-                soil_tiles,
-                destination,
-                output_dir,
-                embed=embed,
-                label_base="Soil Plus (miniaturas)",
+            mat_meta = {}
+            warnings.append(f"Soil Plus MAT metadata: {exc}")
+
+        soil_specs: list[tuple[str, Path, Image.Image | None]] = []
+        dem_path_text = str(mat_meta.get("dem_input_image_path") or "")
+        dem_source = Path(dem_path_text) if dem_path_text else None
+        if dem_source is not None and not dem_source.is_file() and dem_path_text.startswith("/data/storage/"):
+            # Ejecución local: traducir la ruta persistida por el contenedor al storage del proyecto.
+            dem_source = project_root.parents[1] / dem_path_text[len("/data/storage/") :]
+        if dem_source is None or not dem_source.is_file():
+            dem_source = next(
+                (
+                    p
+                    for p in sorted(dem_root.iterdir())
+                    if p.is_file()
+                    and p.suffix.lower() in {".tif", ".tiff", ".img"}
+                    and not p.name.lower().startswith("soilplus_saved_")
+                ),
+                None,
             )
-        except Exception as exc:
-            warnings.append(f"Mosaico Soil Plus: {exc}")
+
+        if dem_source is not None:
+            try:
+                soil_specs.append(
+                    (
+                        "1. DEM MAT — alturas",
+                        assets_root / "ps" / "soil" / "mat_dem_alturas.png",
+                        _soil_dem_height_image(dem_source),
+                    )
+                )
+            except Exception as exc:
+                warnings.append(f"Soil Plus MAT DEM alturas: {exc}")
+        else:
+            warnings.append("Soil Plus MAT DEM alturas: no se encontró el DEM de entrada")
+
+        cv_source = dem_root / "soilplus_saved_matlab_cv.png"
+        if cv_source.is_file():
+            try:
+                soil_specs.append(
+                    (
+                        "2. CV MAT",
+                        assets_root / "ps" / "soil" / "mat_cv.png",
+                        _fit_tile(Image.open(cv_source).convert("RGB")),
+                    )
+                )
+            except Exception as exc:
+                warnings.append(f"Soil Plus MAT CV: {exc}")
+
+        fcm_source = dem_root / "soilplus_saved_matlab_fcm.png"
+        if fcm_source.is_file():
+            try:
+                soil_specs.append(
+                    (
+                        "3. Cluster MAT con ubicación de puntos",
+                        assets_root / "ps" / "soil" / "mat_cluster_puntos.png",
+                        _soil_cluster_samples_image(fcm_source, mat_meta),
+                    )
+                )
+            except Exception as exc:
+                warnings.append(f"Soil Plus MAT cluster con puntos: {exc}")
+
+        for label, destination, image in soil_specs:
+            if image is None:
+                continue
+            buf = BytesIO()
+            image.save(buf, format="PNG", optimize=True)
+            ref = _emit_image(buf.getvalue(), destination, output_dir, embed=embed, mime="image/png")
+            exported["soil"].append({"label": label, "path": ref})
 
     if climate_ps:
         destination = assets_root / "ps" / "climate" / "ps_climate.png"
@@ -913,6 +1175,7 @@ def render_index_block(
     copy: dict,
     inv: dict | None,
     images: list[dict] | None = None,
+    admin_narrative: str = "",
 ) -> list[str]:
     c = copy.get(index_key) or copy.get(index_key.upper()) or {}
     title = c.get("title") or index_key
@@ -938,6 +1201,9 @@ def render_index_block(
     theory = c.get("theory") or c.get("interpretation") or ""
     if theory:
         lines += [f"**{title} (Explicación teórica)**", "", theory, ""]
+    lines += ["**Narrativa del administrador**", ""]
+    body = md_escape(admin_narrative)
+    lines += [body if body else "_Sin narrativa del administrador publicada para este índice._", ""]
     return lines
 
 
@@ -1058,7 +1324,7 @@ def build_markdown(
                             "",
                         ]
                         for image in climate_imgs:
-                            lines += image_markdown(image["label"], image["path"], width=1200)
+                            lines += image_markdown(image["label"], image["path"])
                     else:
                         lines += ["_Sin serie agroclimática disponible para PS._", ""]
 
@@ -1067,7 +1333,7 @@ def build_markdown(
                 lines += [
                     f"**Escenas RGB en recortes:** {rc}",
                     "",
-                    "_Galería temporal consolidada (mosaico legible, máx. 12 escenas por imagen)._",
+                    f"_Galería temporal consolidada (mosaico legible, máx. {MOSAIC_MAX_TILES_PER_PAGE} escenas por imagen)._",
                     "",
                 ]
                 for image in images["rgb"].get(current_sensor, []):
@@ -1090,7 +1356,15 @@ def build_markdown(
                         copy_key = find_farmer_copy_key(farmer_copy, ik)
                         inv_item = find_inventory_item(inv, ik)
                         index_images = images["indices"].get(current_sensor, {}).get(ik.upper(), [])
-                        lines += render_index_block(copy_key, farmer_copy, inv_item, index_images)
+                        narrative_index = re.sub(r"[^A-Z0-9_]", "", str(ik).strip().upper()) or "INDEX"
+                        narrative_key = f"landing-{current_sensor}-index-{narrative_index}"
+                        lines += render_index_block(
+                            copy_key,
+                            farmer_copy,
+                            inv_item,
+                            index_images,
+                            texts.get(narrative_key, ""),
+                        )
 
             elif suffix == "clusters":
                 files = clusters.get(current_sensor, [])
@@ -1129,7 +1403,7 @@ def build_markdown(
                         f"- Muestras totales: {mat.get('total_samples', '—')}",
                         f"- Píxeles por cluster: {mat.get('pixels_per_cluster', [])}",
                         "",
-                        "_En la landing se muestran miniaturas: DEM, CV, aspect, slope, cluster, bars, qchart._",
+                        "_Imágenes MAT incluidas: DEM con barra de alturas, CV y cluster con ubicación de puntos._",
                         "",
                     ]
                     for image in images["soil"]:
@@ -1161,6 +1435,94 @@ def build_markdown(
     return "\n".join(lines)
 
 
+def generate_markdowns(
+    project_id: int,
+    *,
+    storage: Path = STORAGE_DEFAULT,
+    database_url: str | None = None,
+    output_dir: Path | None = None,
+    embed_images: bool = True,
+    max_md_mb: float = MAX_MD_MB_DEFAULT,
+) -> list[dict]:
+    """
+    Genera los tres Markdown (PS, S1, S2) de la landing narrativa.
+    Retorna [{sensor, path, size_mb}]; cada .md embebido se comprime hasta ≤ max_md_mb.
+    """
+    farmer_copy = load_index_farmer_copy()
+    conn = db_connect(database_url)
+    try:
+        project = fetch_project(conn, project_id)
+        texts = fetch_landing_texts(conn, project_id)
+        tenant_id = project["tenant_id"]
+        project_root = storage / f"tenant_{tenant_id}" / f"project_{project_id}"
+        inventories = {sk: scan_index_inventory(project_root, sk) for sk in SENSOR_ORDER}
+
+        climate_ps: list[dict] = []
+        ps_dates: list[str] = []
+        for item in inventories.get("ps", {}).values():
+            ps_dates.extend(str(d)[:10] for d in (item.get("band_dates") or []))
+        ps_dates = sorted({d for d in ps_dates if len(d) >= 10})
+        centroid = _centroid_from_project(project_root, conn, project_id)
+        if centroid and ps_dates:
+            try:
+                lat, lon = centroid
+                monthly = _open_meteo_monthly_means(lat, lon, ps_dates[0], ps_dates[-1])
+                climate_ps = build_climate_series_for_dates(ps_dates, monthly)
+            except Exception as exc:
+                print(f"Aviso clima PS: {exc}")
+    finally:
+        conn.close()
+
+    clusters = {sk: list_cluster_files(project_root, sk) for sk in SENSOR_ORDER}
+    recorte_counts = {sk: count_recortes(project_root, sk) for sk in SENSOR_ORDER}
+    soil = load_soil_summary(project_root)
+    smart = load_smart_cluster_meta(project_root)
+    out_dir = output_dir or (project_root / "markdown")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    images, image_warnings = export_landing_images(
+        project_root,
+        out_dir,
+        inventories,
+        embed=embed_images,
+        climate_ps=climate_ps,
+    )
+
+    modo = "imágenes embebidas (base64)" if embed_images else "imágenes en assets/"
+    output_names = {
+        "ps": "landing_narrativa_PS.md",
+        "s1": "landing_narrativa_S1.md",
+        "s2": "landing_narrativa_S2.md",
+    }
+    max_bytes = int(max_md_mb * 1024 * 1024)
+    outputs: list[dict] = []
+    for sensor_key in SENSOR_ORDER:
+        md = build_markdown(
+            project,
+            sensor_key,
+            texts,
+            inventories,
+            clusters,
+            recorte_counts,
+            soil,
+            smart,
+            farmer_copy,
+            images,
+            image_warnings,
+        )
+        if embed_images and max_bytes > 0:
+            md = enforce_markdown_size_limit(md, max_bytes, label=output_names[sensor_key])
+        out_path = out_dir / output_names[sensor_key]
+        out_path.write_text(md, encoding="utf-8")
+        size_mb = out_path.stat().st_size / (1024 * 1024)
+        print(f"Escrito: {out_path} ({size_mb:.1f} MB, {modo})")
+        outputs.append({"sensor": sensor_key, "path": str(out_path), "size_mb": round(size_mb, 2)})
+
+    legacy_path = out_dir / "landing_narrativa.md"
+    if legacy_path.exists():
+        legacy_path.unlink()
+    return outputs
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Exportar landing narrativa a Markdown")
     parser.add_argument("--project-id", type=int, default=19)
@@ -1172,6 +1534,12 @@ def main() -> int:
     )
     parser.add_argument("--storage", type=Path, default=STORAGE_DEFAULT)
     parser.add_argument("--database-url", default=None)
+    parser.add_argument(
+        "--max-md-mb",
+        type=float,
+        default=MAX_MD_MB_DEFAULT,
+        help="Tamaño máximo de cada .md embebido (MB); 0 desactiva el límite.",
+    )
     embed_group = parser.add_mutually_exclusive_group()
     embed_group.add_argument(
         "--embed-images",
@@ -1188,73 +1556,14 @@ def main() -> int:
     parser.set_defaults(embed_images=True)
     args = parser.parse_args()
 
-    farmer_copy = load_index_farmer_copy()
-    conn = db_connect(args.database_url)
-    try:
-        project = fetch_project(conn, args.project_id)
-        texts = fetch_landing_texts(conn, args.project_id)
-        tenant_id = project["tenant_id"]
-        project_root = args.storage / f"tenant_{tenant_id}" / f"project_{args.project_id}"
-        inventories = {sk: scan_index_inventory(project_root, sk) for sk in SENSOR_ORDER}
-
-        climate_ps: list[dict] = []
-        ps_dates: list[str] = []
-        for item in inventories.get("ps", {}).values():
-            ps_dates.extend(str(d)[:10] for d in (item.get("band_dates") or []))
-        ps_dates = sorted({d for d in ps_dates if len(d) >= 10})
-        centroid = _centroid_from_project(project_root, conn, args.project_id)
-        if centroid and ps_dates:
-            try:
-                lat, lon = centroid
-                monthly = _open_meteo_monthly_means(lat, lon, ps_dates[0], ps_dates[-1])
-                climate_ps = build_climate_series_for_dates(ps_dates, monthly)
-            except Exception as exc:
-                print(f"Aviso clima PS: {exc}")
-    finally:
-        conn.close()
-
-    clusters = {sk: list_cluster_files(project_root, sk) for sk in SENSOR_ORDER}
-    recorte_counts = {sk: count_recortes(project_root, sk) for sk in SENSOR_ORDER}
-    soil = load_soil_summary(project_root)
-    smart = load_smart_cluster_meta(project_root)
-    out_dir = args.output_dir or (project_root / "markdown")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    images, image_warnings = export_landing_images(
-        project_root,
-        out_dir,
-        inventories,
-        embed=args.embed_images,
-        climate_ps=climate_ps,
+    generate_markdowns(
+        args.project_id,
+        storage=args.storage,
+        database_url=args.database_url,
+        output_dir=args.output_dir,
+        embed_images=args.embed_images,
+        max_md_mb=args.max_md_mb,
     )
-
-    modo = "imágenes embebidas (base64)" if args.embed_images else "imágenes en assets/"
-    output_names = {
-        "ps": "landing_narrativa_PS.md",
-        "s1": "landing_narrativa_S1.md",
-        "s2": "landing_narrativa_S2.md",
-    }
-    for sensor_key in SENSOR_ORDER:
-        md = build_markdown(
-            project,
-            sensor_key,
-            texts,
-            inventories,
-            clusters,
-            recorte_counts,
-            soil,
-            smart,
-            farmer_copy,
-            images,
-            image_warnings,
-        )
-        out_path = out_dir / output_names[sensor_key]
-        out_path.write_text(md, encoding="utf-8")
-        size_mb = out_path.stat().st_size / (1024 * 1024)
-        print(f"Escrito: {out_path} ({size_mb:.1f} MB, {modo})")
-
-    legacy_path = out_dir / "landing_narrativa.md"
-    if legacy_path.exists():
-        legacy_path.unlink()
     return 0
 
 

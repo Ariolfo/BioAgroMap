@@ -68,10 +68,33 @@ export const LANDING_INDEX_GROUPS = [
   },
 ];
 
+/** Índices ópticos reales por sensor (alineado a catálogos de estimación / galería). */
+const OPTICAL_KEYS_BY_SENSOR = {
+  ps: new Set([
+    "NDVI",
+    "EVI",
+    "NDWI",
+    "MSAVI2",
+    "MTVI2",
+    "VARI",
+    "TGI",
+    "KNDVI",
+    "GIYI",
+    "MCARI",
+    "NDRE",
+    "RSTRUCTURE",
+  ]),
+  // CIre = (B8/B5)−1 es Sentinel-2; no se calcula en PlanetScope.
+  s2: new Set(["NDVI", "EVI", "NDWI", "CIre", "MCARI"]),
+};
+
 export function indexKeysForLandingGroup(groupId, sensorKey) {
   const g = LANDING_INDEX_GROUPS.find((x) => x.id === groupId);
   if (!g) return [];
-  return sensorKey === "s1" ? g.keysSar : g.keysOptical;
+  if (sensorKey === "s1") return [...g.keysSar];
+  const allow = OPTICAL_KEYS_BY_SENSOR[sensorKey] || OPTICAL_KEYS_BY_SENSOR.s2;
+  const allowUpper = new Set([...allow].map((x) => String(x).toUpperCase()));
+  return g.keysOptical.filter((k) => allowUpper.has(String(k).toUpperCase()));
 }
 
 /**
